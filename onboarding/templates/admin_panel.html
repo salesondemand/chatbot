@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>InPlace Admin Panel</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/forms"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .tab-active { @apply bg-gradient-to-r from-blue-500 to-indigo-600 shadow-lg scale-105; }
+  </style>
+</head>
+<body class="bg-gradient-to-br from-gray-50 to-gray-200 min-h-screen p-8 text-gray-800">
+
+  <header class="mb-10 flex items-center space-x-4">
+    <img src="https://img.icons8.com/color/48/graph.png" alt="Logo">
+    <h1 class="text-4xl font-extrabold text-gray-900">InPlace Admin Dashboard</h1>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="mb-8 flex space-x-4">
+    <button onclick="showTab('upload')" class="tab-button px-6 py-3 rounded-xl bg-white hover:tab-active focus:outline-none font-semibold shadow">📤 Upload</button>
+    <button onclick="showTab('inbox')" class="tab-button px-6 py-3 rounded-xl bg-white hover:tab-active focus:outline-none font-semibold shadow">🚨 Escalation</button>
+    <button onclick="showTab('report')" class="tab-button px-6 py-3 rounded-xl bg-white hover:tab-active focus:outline-none font-semibold shadow">📈 Reports</button>
+  </nav>
+
+  <!-- Upload Section -->
+  <section id="tab-upload" class="tab-section bg-white p-8 rounded-3xl shadow-xl">
+    <h2 class="text-2xl font-bold text-indigo-600 mb-4">📤 Upload Excel File</h2>
+    <p class="mb-4 text-gray-600">Submit a new batch of candidates using an Excel file (.xls or .xlsx).</p>
+    <div id="upload-alert" class="hidden p-4 mb-4 rounded-lg text-sm" role="alert"></div>
+    <form id="upload-form" action="/upload/" method="POST" enctype="multipart/form-data" class="flex flex-col sm:flex-row items-center gap-4">
+      {% csrf_token %}
+      <input type="file" name="file" accept=".xlsx,.xls" required class="file:border file:border-gray-300 file:rounded-md file:px-4 file:py-2 file:bg-gray-100">
+      <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-2 rounded-lg transition-all duration-200">Upload</button>
+    </form>
+  </section>
+
+  <!-- Escalation Section -->
+  <section id="tab-inbox" class="tab-section hidden bg-white p-8 rounded-3xl shadow-xl">
+    <h2 class="text-2xl font-bold text-red-600 mb-4">🚨 Escalation Inbox</h2>
+    <p class="mb-4 text-gray-600">Chat directly with candidates who need manual intervention.</p>
+    <div id="inbox" class="space-y-2 mb-6"></div>
+    <h3 id="chat-title" class="text-lg font-semibold mb-2">💬 Chat with:</h3>
+    <div id="chat-box" class="bg-gray-50 border border-gray-200 p-4 rounded-lg h-64 overflow-y-auto mb-4"></div>
+    <form id="reply-form" onsubmit="sendReply(event)" class="flex items-center gap-3">
+      <input type="text" id="admin-reply" placeholder="Type your reply..." class="flex-grow border p-2 rounded-lg">
+      <button type="submit" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg">Send</button>
+    </form>
+    <button onclick="resumeBot()" class="mt-4 bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg">✅ Resume Bot</button>
+  </section>
+
+  <!-- Reporting Section -->
+  <section id="tab-report" class="tab-section hidden bg-white p-8 rounded-3xl shadow-xl">
+    <h2 class="text-2xl font-bold text-green-600 mb-4">📈 Reporting Dashboard</h2>
+    <p class="mb-4 text-gray-600">Track message statuses and candidate interactions.</p>
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm border border-gray-300 rounded-lg">
+        <thead class="bg-gray-200 text-gray-700">
+          <tr>
+            <th class="px-4 py-2 border">Name</th>
+            <th class="px-4 py-2 border">Phone</th>
+            <th class="px-4 py-2 border">Status</th>
+            <th class="px-4 py-2 border">Last Updated</th>
+            <th class="px-4 py-2 border">Escalated</th>
+            <th class="px-4 py-2 border">Chat</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in candidates %}
+          <tr class="text-center hover:bg-gray-50">
+            <td class="px-4 py-2 border">{{ c.name }}</td>
+            <td class="px-4 py-2 border">{{ c.phone_number }}</td>
+            <td class="px-4 py-2 border">{{ c.status }}</td>
+            <td class="px-4 py-2 border">{{ c.last_updated|date:"Y-m-d H:i" }}</td>
+            <td class="px-4 py-2 border">{% if c.status == 'escalated' %}✅{% else %}❌{% endif %}</td>
+            <td class="px-4 py-2 border"><a href="https://wa.me/{{ c.phone_number }}" target="_blank" class="text-blue-600 underline hover:text-blue-800">Open Chat</a></td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="6" class="text-center py-4 text-gray-500">No candidates found.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <script>
+    let selectedPhone = null;
+    let intervalId = null;
+
+    function showTab(tabId) {
+      document.querySelectorAll('.tab-section').forEach(sec => sec.classList.add('hidden'));
+      document.getElementById(`tab-${tabId}`).classList.remove('hidden');
+    }
+
+    async function loadEscalations() {
+      const res = await fetch('/get-escalated/');
+      const data = await res.json();
+      const inbox = document.getElementById('inbox');
+      inbox.innerHTML = '';
+      data.forEach(c => {
+        const btn = document.createElement('button');
+        btn.innerText = `${c.name} (${c.phone_number})`;
+        btn.onclick = () => selectCandidate(c.phone_number, c.name);
+        btn.className = "bg-red-100 hover:bg-red-200 text-red-700 font-semibold py-2 px-4 rounded w-full text-left transition-all duration-200";
+        inbox.appendChild(btn);
+      });
+    }
+
+    function selectCandidate(phone, name) {
+      selectedPhone = phone;
+      document.getElementById('chat-title').innerText = '💬 Chat with: ' + name;
+      fetchChat();
+      if (intervalId) clearInterval(intervalId);
+      intervalId = setInterval(fetchChat, 2000);
+    }
+
+    async function fetchChat() {
+      if (!selectedPhone) return;
+      const res = await fetch(`/get-chat-history/?phone=${selectedPhone}`);
+      const data = await res.json();
+      const chatBox = document.getElementById('chat-box');
+      chatBox.innerHTML = '';
+      data.history.forEach(msg => {
+        const div = document.createElement('div');
+        div.classList.add('p-2', 'mb-1', 'rounded', 'shadow-sm');
+        div.classList.add(msg.from === 'user' ? 'bg-red-100' : msg.from === 'admin' ? 'bg-blue-100' : 'bg-green-100');
+        div.innerText = `${msg.from}: ${msg.text}`;
+        chatBox.appendChild(div);
+      });
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    async function sendReply(e) {
+      e.preventDefault();
+      const text = document.getElementById('admin-reply').value;
+      if (!selectedPhone || !text) return;
+      await fetch('/send-admin-reply/', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({phone_number: selectedPhone, text})
+      });
+      document.getElementById('admin-reply').value = '';
+      fetchChat();
+    }
+
+    async function resumeBot() {
+      if (!selectedPhone) return;
+      await fetch('/resume-bot/', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({phone_number: selectedPhone})
+      });
+      alert("Bot resumed for user.");
+    }
+
+    window.onload = function() {
+      showTab('upload');
+      loadEscalations();
+
+      const uploadForm = document.getElementById('upload-form');
+      if (uploadForm) {
+        uploadForm.addEventListener('submit', async function(e) {
+          e.preventDefault();
+          const form = e.target;
+          const data = new FormData(form);
+          const res = await fetch(form.action, {method: 'POST', body: data});
+          const json = await res.json();
+          const alertBox = document.getElementById('upload-alert');
+          if (json.success) {
+            alertBox.classList.remove('hidden', 'text-red-700', 'bg-red-100');
+            alertBox.classList.add('text-green-700', 'bg-green-100');
+            alertBox.innerHTML = `<strong>✅ Upload complete!</strong><br>${json.added} new candidate${json.added !== 1 ? 's' : ''} added, ${json.skipped} record${json.skipped !== 1 ? 's' : ''} skipped.`;
+          } else {
+            alertBox.classList.remove('hidden', 'text-green-700', 'bg-green-100');
+            alertBox.classList.add('text-red-700', 'bg-red-100');
+            alertBox.textContent = '🚨 Upload failed, please try again.';
+          }
+          setTimeout(function() { alertBox.classList.add('hidden'); }, 5000);
+        });
+      }
+    };
+  </script>
+
+</body>
+</html>

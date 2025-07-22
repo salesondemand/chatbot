@@ -1,0 +1,130 @@
+The process starts with:
+1. Go to inplace.it → click "Register" → click "Register as Candidate"
+2. Enter: name, surname, email, password → verify email via link
+
+Then:
+- Enter info: name, surname, phone, date of birth
+- Add job info: sector, role of interest, years experience, language, employment status, preferred location
+→ Profile becomes 20% complete
+
+Then complete the 5 main steps:
+1. Personal Data
+2. Resume
+3. Personal Documents
+4. Contractual Documents
+5. Digital Signature
+
+PERSONAL DATA:
+- Fields: name, surname, tax code, date/state/region/province of birth, nationality, phone, gender
+- Residence & domicile addresses
+- Tax code auto-fills some fields
+- Important: The tax code (Codice Fiscale) must be entered in the personal data section together with other mandatory data such as nationality and residence.
+- Permesso di Soggiorno:
+  If the candidate is a foreigner and needs a residence permit to work in Italy, they must enter the "Permesso di Soggiorno" section in personal data, complete the required fields, and upload photos of the permit.
+  (The residence permit is an official document issued by the Italian government that allows non-EU citizens to legally reside, work, and access services such as healthcare and education in Italy.)
+→ Profile becomes 40% complete
+
+RESUME:
+- Add location preferences, qualifications (Italian-issued), school type, year
+- Add experiences: role, company, type, start date, current or not
+- Add language skills and proficiency
+- Education, training, and CV are not mandatory for 100% profile completion but recommended.
+- If the candidate does not have a CV or necessary data to complete this part, they can skip it and proceed with contractual documents.
+
+PERSONAL DOCUMENTS:
+- Upload identity card/passport/license
+- Fields: doc number, issuing authority, issue/expiry dates
+- File format: 2 JPEGs (front/back) or 1 PDF
+- Re-enter tax code here
+- Candidates may upload their passport (main page only in PDF); the issuing authority for the passport should be QUESTURA.
+- Identity Document Issues:
+  If the candidate reports that their ID document was rejected or not accepted, instruct them to check the email explaining the reason, correct the data, and re-upload the document.
+  The issuing authority must be written as "COMUNE".
+  They must verify that dates and the document code are correct (for the identity card, the code is located at the top right, inside the highlighted area).
+  When uploading the two JPEG photos, ensure the checkbox under “ALLEGATI” is selected.
+- Fiscal Document (Documento Fiscale):
+  If the candidate says they uploaded the identity card and asks how to proceed or about the fiscal document, inform them they must upload front and back photos of the health card (tessera sanitaria) in JPEG format.
+  The photos must be uploaded alone, without other data, and the checkbox under “ALLEGATI” must be ticked.
+
+CONTRACTUAL DOCUMENTS:
+Grouped into:
+1. Valid for all contracts:
+  - Tax deductions
+  - Family status and residence
+  - Bank account info
+  - Union membership
+2. Valid per contract:
+  - Unemployment self-certification
+  - TFR selection
+
+Tax Deductions:
+- Choose year
+- Marital status
+- Employment income type
+- Dependents deductions
+- Other income declaration
+- Legal self-declaration
+- If the candidate does not receive pensions, is not married, does not have a VAT number, and has no other income, the tax deductions document can be saved without changes.
+- If unsure about the information to enter, it is better to ask an accountant.
+- Save
+
+Family & Residence:
+- Add dependent: name, surname, relationship, tax code, birth data, gender, dependent status, disability
+- Family Status Form:
+  The family status form should be completed only if the candidate has children and/or spouses dependent on them.
+  Data about parents or other relatives should NOT be included.
+  If the candidate has no dependents for tax purposes, the form should NOT be completed, and the candidate should proceed to the next steps.
+
+Bank Info:
+- IBAN, bank type (Italian or foreign)
+- Must be user’s or jointly held
+- If the candidate cannot save the IBAN, they must check that there are no spaces in the code.
+- Advise them to copy it directly from their personal profile on the bank's website.
+- If the problem persists, they should contact an operator and prepare their IBAN code and the data of their branch (name of the bank, address, city, postal code).
+- Save
+
+Union Membership:
+- Choose: "Not affiliated" or add union details
+- Save
+- Union Membership Form:
+  The union membership form should only be saved if the candidate is NOT affiliated with any union.
+  In this case, the candidate just needs to open and save the form without filling in any details.
+  There are no fields to fill in or options to choose.
+
+Unemployment Certification:
+- Options: Unemployed / Part-time
+- If unemployed, enter the end date of the last job.
+- If part-time, enter the number of hours worked per week.
+- Save
+
+TFR Selection:
+- Transfer to pension fund? (Yes/No)
+- Effective date, first job date, social security enrollment before 1993
+- Save
+
+NOTES:
+- All documents marked with * are mandatory
+- Digital Signature unlocks after 80% profile completion
+- SPID login required for digital signing
+
+Digital Signature:
+- To start the digital signature process, click on the "+" at the bottom of the dashboard.
+- Accept the 3 necessary conditions and continue.
+- A screen will open with 3 options: SPID, CIE, and Video Identification.
+- The candidate must choose the option that best suits their needs.
+- After completing this step, they will receive an email with the document to sign to activate the digital signature.
+- To sign the document, open it from the email received and click on signature.
+- They will receive an OTP code via SMS that must be entered to complete the signature.
+
+Digital Signature Issues:
+- If the candidate says that after accepting the 3 conditions nothing happens or only sees the message "Operazione eseguita con successo", advise them to try another browser such as Chrome or to try again using a PC.
+- If the candidate says the "+" symbol for the digital signature is not clickable, advise them to log out of their personal profile and log back in before trying again.
+
+FINAL STEP:
+- Email: "New document to sign from NoReplyInPlace.it"
+- Click link, read contract, enter OTP → Signed
+- Candidate receives email + SMS confirmation
+- Can now apply for jobs
+
+Saving Data Issues:
+If the candidate cannot save their data, ask them to verify that all mandatory fields are filled and that dates are entered in the DD/MM/YYYY format. Then, ask them to try saving again.
