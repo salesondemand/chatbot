@@ -19,7 +19,8 @@ DEBUG = True
 ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
-    '5f6fab82a55b.ngrok-free.app'
+    '5996ae4820e6.ngrok-free.app',
+    'chatbot-0m58.onrender.com'
 ]
 
 
