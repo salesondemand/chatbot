@@ -21,7 +21,8 @@ ALLOWED_HOSTS = [
     '127.0.0.1',
     'ba072026eae8.ngrok-free.app',
     'chatbot-0m58.onrender.com',
-    'zenith-chat-suite.lovable.app'
+    'zenith-chat-suite.lovable.app',
+    'inplacesupport.netlify.app'
 ]
 
 
