@@ -19,13 +19,15 @@ DEBUG = True
 ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
-    '5996ae4820e6.ngrok-free.app',
-    'chatbot-0m58.onrender.com'
+    'ba072026eae8.ngrok-free.app',
+    'chatbot-0m58.onrender.com',
+    'zenith-chat-suite.lovable.app'
 ]
 
 
 # Installed apps
 INSTALLED_APPS = [
+    'corsheaders',
     'onboarding',  # your app
     'django.contrib.admin',
     'django.contrib.auth',
@@ -33,10 +35,12 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    
 ]
 
 # Middleware
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -105,3 +109,34 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # Default primary key
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# CORS SETTINGS
+CORS_ALLOWED_ORIGINS = [
+    'https://zenith-chat-suite.lovable.app',
+    'https://ba072026eae8.ngrok-free.app',  # Optional, for local testing
+]
+
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+    'access-control-allow-origin',
+    "ngrok-skip-browser-warning", 
+]
+
+CORS_ALLOW_ALL_HEADERS = True
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = [
+    "GET",
+    "POST",
+    "PUT",
+    "DELETE",
+    "OPTIONS"
+]
+

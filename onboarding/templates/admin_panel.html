@@ -24,6 +24,8 @@
     <button onclick="showTab('upload')" class="tab-button px-6 py-3 rounded-xl bg-white hover:tab-active focus:outline-none font-semibold shadow">📤 Upload</button>
     <button onclick="showTab('inbox')" class="tab-button px-6 py-3 rounded-xl bg-white hover:tab-active focus:outline-none font-semibold shadow">🚨 Escalation</button>
     <button onclick="showTab('report')" class="tab-button px-6 py-3 rounded-xl bg-white hover:tab-active focus:outline-none font-semibold shadow">📈 Reports</button>
+    <button onclick="showTab('allchats')" class="tab-button px-6 py-3 rounded-xl bg-white hover:tab-active focus:outline-none font-semibold shadow">💬 All Chats</button>
+
   </nav>
 
   <!-- Upload Section -->
@@ -51,6 +53,26 @@
     </form>
     <button onclick="resumeBot()" class="mt-4 bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg">✅ Resume Bot</button>
   </section>
+  <!-- All Chats Section -->
+<section id="tab-allchats" class="tab-section hidden bg-white p-8 rounded-3xl shadow-xl">
+  <h2 class="text-2xl font-bold text-indigo-600 mb-4">💬 All Conversations</h2>
+  <p class="mb-4 text-gray-600">View every conversation with candidates, not just escalated ones.</p>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+  <!-- Candidate List -->
+  <div class="col-span-1 space-y-2 overflow-y-auto max-h-96 pr-2">
+    <h3 class="text-sm font-semibold text-gray-500 mb-1">👥 Candidates</h3>
+    <div id="allchats" class="space-y-2"></div>
+  </div>
+
+  <!-- Chat Viewer -->
+  <div class="col-span-2 bg-white border border-gray-300 rounded-xl p-4 shadow-inner h-96 flex flex-col">
+    <h3 id="chat-title-all" class="text-lg font-bold text-indigo-600 mb-2">💬 Chat with:</h3>
+    <div id="chat-box-all" class="flex-grow overflow-y-auto flex flex-col space-y-2 pr-2"></div>
+  </div>
+</div>
+
+</section>
+
 
   <!-- Reporting Section -->
   <section id="tab-report" class="tab-section hidden bg-white p-8 rounded-3xl shadow-xl">
@@ -96,7 +118,7 @@
     }
 
     async function loadEscalations() {
-      const res = await fetch('/get-escalated/');
+      const res = await fetch('/get_escalated/');
       const data = await res.json();
       const inbox = document.getElementById('inbox');
       inbox.innerHTML = '';
@@ -109,6 +131,76 @@
       });
     }
 
+    async function loadAllChats() {
+  const res = await fetch('/get_all_chats/');
+  const data = await res.json();
+  const container = document.getElementById('allchats');
+  container.innerHTML = '';
+  data.forEach(c => {
+    const btn = document.createElement('button');
+    btn.innerHTML = `
+  <div class="text-sm font-semibold text-gray-800">${c.name}</div>
+  <div class="text-xs text-gray-500">${c.phone_number}</div>
+`;
+
+    btn.onclick = () => selectChatUser(c.phone_number, c.name);
+    btn.className = "bg-blue-100 hover:bg-blue-200 text-blue-800 font-semibold py-2 px-4 rounded w-full text-left transition-all duration-200";
+
+    container.appendChild(btn);
+  });
+}
+
+let selectedPhoneAll = null;
+let intervalAll = null;
+
+function selectChatUser(phone, name) {
+  selectedPhoneAll = phone;
+  document.getElementById('chat-title-all').innerText = '💬 Chat with: ' + name;
+  fetchChatAll();
+  if (intervalAll) clearInterval(intervalAll);
+  intervalAll = setInterval(fetchChatAll, 2000);
+}
+
+async function fetchChatAll() {
+  if (!selectedPhoneAll) return;
+  const res = await fetch(`/get_chat_history/?phone=${selectedPhoneAll}`);
+  const data = await res.json();
+  const chatBox = document.getElementById('chat-box-all');
+  chatBox.innerHTML = '';
+  data.history.forEach(msg => {
+    const div = document.createElement('div');
+    div.classList.add('p-2', 'mb-1', 'rounded', 'shadow-sm');
+    div.classList.add(msg.from === 'user' ? 'bg-red-100' : msg.from === 'admin' ? 'bg-blue-100' : 'bg-green-100');
+    const label = msg.from === 'user' ? '✅ user' : msg.from === 'bot' ? '🤖 bot' : '🧑‍💼 admin';
+
+div.innerHTML = `
+  <div class="text-xs text-gray-500 mb-1">${label}</div>
+  <div class="text-sm font-medium">${msg.text}</div>
+`;
+div.classList.add(
+  'max-w-xs', 'whitespace-pre-wrap', 'px-4', 'py-2', 'rounded-xl', 'shadow',
+  'text-sm', 'self-start'
+);
+if (msg.from === 'user') {
+  div.classList.add('bg-white', 'text-gray-800', 'border');
+} else if (msg.from === 'bot') {
+  div.classList.add('bg-green-100', 'text-green-900', 'self-end');
+} else {
+  div.classList.add('bg-blue-100', 'text-blue-900', 'self-end');
+}
+
+
+    chatBox.appendChild(div);
+  });
+  const isNearBottom = chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight < 50;
+
+if (isNearBottom) {
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+}
+
+
     function selectCandidate(phone, name) {
       selectedPhone = phone;
       document.getElementById('chat-title').innerText = '💬 Chat with: ' + name;
@@ -119,7 +211,7 @@
 
     async function fetchChat() {
       if (!selectedPhone) return;
-      const res = await fetch(`/get-chat-history/?phone=${selectedPhone}`);
+      const res = await fetch(`/get_chat_history/?phone=${selectedPhone}`);
       const data = await res.json();
       const chatBox = document.getElementById('chat-box');
       chatBox.innerHTML = '';
@@ -135,20 +227,20 @@
 
     async function sendReply(e) {
       e.preventDefault();
-      const text = document.getElementById('admin-reply').value;
+      const text = document.getElementById('admin_reply').value;
       if (!selectedPhone || !text) return;
-      await fetch('/send-admin-reply/', {
+      await fetch('/send_admin_reply/', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({phone_number: selectedPhone, text})
       });
-      document.getElementById('admin-reply').value = '';
+      document.getElementById('admin_reply').value = '';
       fetchChat();
     }
 
     async function resumeBot() {
       if (!selectedPhone) return;
-      await fetch('/resume-bot/', {
+      await fetch('/resume_bot/', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({phone_number: selectedPhone})
@@ -159,8 +251,10 @@
     window.onload = function() {
       showTab('upload');
       loadEscalations();
+      loadAllChats();
 
-      const uploadForm = document.getElementById('upload-form');
+
+      const uploadForm = document.getElementById('upload_form');
       if (uploadForm) {
         uploadForm.addEventListener('submit', async function(e) {
           e.preventDefault();
@@ -168,7 +262,7 @@
           const data = new FormData(form);
           const res = await fetch(form.action, {method: 'POST', body: data});
           const json = await res.json();
-          const alertBox = document.getElementById('upload-alert');
+          const alertBox = document.getElementById('upload_alert');
           if (json.success) {
             alertBox.classList.remove('hidden', 'text-red-700', 'bg-red-100');
             alertBox.classList.add('text-green-700', 'bg-green-100');

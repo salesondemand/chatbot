@@ -113,19 +113,84 @@ def meta_webhook(request):
                     defaults={'name': 'Unknown', 'surname': 'Unknown'}
                 )
 
-                if incoming_msg.lower().strip() in ["help", "support", "talk to human", "human", "operator"]:
-                    candidate.status = "escalated"
-                    candidate.save()
-
                 if candidate.history is None:
                     candidate.history = []
                 candidate.history.append({"from": "user", "text": incoming_msg})
                 candidate.save()
 
-                if candidate.status == 'escalated':
-                    print("⛔ Bot paused for this user (escalated).")
+                # ✅ SMART ESCALATION SYSTEM (Scored)
+                should_escalate = False
+                escalation_reason = ""
+
+                if candidate.status != "escalated":
+                    try:
+                        chat_history = candidate.history[-5:] if candidate.history else []
+                        chat_history_text = "\n".join(
+                            [f"{m['from']}: {m['text']}" for m in chat_history] + [f"user: {incoming_msg}"]
+                        )
+
+                        classification_prompt = f"""
+You are an escalation analyzer for a support chatbot.
+
+You will be given a conversation (last few messages) between a user and a chatbot. Return a JSON response with these four fields:
+
+- frustration_score (0 to 10): how angry, annoyed, or upset the user seems
+- human_request_score (0 to 10): how much the user is asking to talk to a human
+- confusion_score (0 to 10): how unclear or lost the user seems
+- repeat_count (0 to 10): how many times the user seems to have asked the same thing
+
+Only escalate if the scores are high.
+DO NOT escalate if the user is just asking for help, trying again, or being polite.
+
+Your reply must be only a JSON object like:
+{{
+  "frustration_score": 7,
+  "human_request_score": 2,
+  "confusion_score": 8,
+  "repeat_count": 3
+}}
+
+--- CHAT START ---
+{chat_history_text}
+--- CHAT END ---
+"""
+
+                        result = client.chat.completions.create(
+                            model="gpt-4o",
+                            timeout=10,
+                            messages=[
+                                {"role": "system", "content": classification_prompt}
+                            ]
+                        )
+
+                        response_text = result.choices[0].message.content
+                        print("🧠 Raw GPT Escalation Scores:", response_text)
+
+                        scores = json.loads(response_text)
+                        f = scores.get("frustration_score", 0)
+                        h = scores.get("human_request_score", 0)
+                        c = scores.get("confusion_score", 0)
+                        r = scores.get("repeat_count", 0)
+
+                        if f >= 7 or h >= 8 or (c >= 8 and r >= 3):
+                            should_escalate = True
+                            escalation_reason = f"Escalated (F:{f}, H:{h}, C:{c}, R:{r})"
+
+                    except Exception as e:
+                        print("⚠️ GPT Escalation Error:", e)
+
+                if should_escalate:
+                    candidate.status = "escalated"
+                    candidate.escalation_reason = escalation_reason
+                    candidate.save()
+                    print(f"⛔ Escalated: {escalation_reason}")
                     return JsonResponse({"status": "paused"})
 
+                if candidate.status == 'escalated':
+                    print("⛔ Bot paused for this user (already escalated).")
+                    return JsonResponse({"status": "paused"})
+
+                # ✅ CHATBOT REPLY (Normal)
                 lang = detect_language(incoming_msg)
                 system_prompt = f"""
 Sei un assistente virtuale esperto della piattaforma InPlace.it...
@@ -151,7 +216,7 @@ Here is all platform knowledge:
                     reply = chat_completion.choices[0].message.content.strip()
                     print("[GPT REPLY]:", reply)
                 except Exception as e:
-                    reply = "Si è verificato un errore. Riprova più tardi."
+                    reply = "Sorry, something went wrong. Please try again later."
                     print("[GPT ERROR]:", e)
 
                 candidate.history.append({"from": "bot", "text": reply})
@@ -176,6 +241,9 @@ Here is all platform knowledge:
             print("❌ Error in meta_webhook main handler:", e)
 
         return JsonResponse({"status": "received"})
+
+
+
 
 
 @csrf_exempt
@@ -281,7 +349,33 @@ def resume_bot(request):
     try:
         candidate = Candidate.objects.get(phone_number=phone)
         candidate.status = 'replied'
+        candidate.escalation_reason = None
+
+        # ✅ Trim chat history to remove old frustration context
+        if candidate.history:
+            candidate.history = candidate.history[-3:]  # keep only last 3 messages
+
         candidate.save()
         return JsonResponse({"resumed": True})
     except Candidate.DoesNotExist:
         return JsonResponse({"resumed": False})
+
+    
+
+
+@require_GET
+def get_all_chats(request):
+    candidates = Candidate.objects.exclude(history=None).order_by('-last_updated')
+    data = []
+    for c in candidates:
+        last_msg = c.history[-1] if c.history else {}
+        data.append({
+            "name": c.name,
+            "phone_number": c.phone_number,
+            "status": c.status,
+            "last_message": last_msg.get("text", ""),
+            "last_sender": last_msg.get("from", ""),
+            "last_updated": c.last_updated.strftime("%Y-%m-%d %H:%M")
+        })
+    return JsonResponse(data, safe=False)
+
