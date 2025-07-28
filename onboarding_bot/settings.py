@@ -113,7 +113,8 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # CORS SETTINGS
 CORS_ALLOWED_ORIGINS = [
     'https://zenith-chat-suite.lovable.app',
-    'https://ba072026eae8.ngrok-free.app',  # Optional, for local testing
+    'https://ba072026eae8.ngrok-free.app',
+    'https://inplacesupport.netlify.app/',  # Optional, for local testing
 ]
 
 CORS_ALLOW_HEADERS = [
