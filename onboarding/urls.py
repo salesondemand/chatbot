@@ -9,5 +9,7 @@ urlpatterns = [
     path('send_admin_reply/', views.send_admin_reply, name='send_admin_reply'),
     path('resume_bot/', views.resume_bot, name='resume_bot'),
     path('get_all_chats/', views.get_all_chats, name='get_all_chats'),
+    path('get_report_stats/', views.get_report_stats, name='get_report_stats'),
+
 
 ]

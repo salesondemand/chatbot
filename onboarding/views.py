@@ -379,3 +379,63 @@ def get_all_chats(request):
         })
     return JsonResponse(data, safe=False)
 
+from django.db.models import Count
+
+@require_GET
+def get_report_stats(request):
+    candidates = Candidate.objects.all()
+    total_users = candidates.count()
+    total_messages = 0
+    bot_messages = 0
+    user_messages = 0
+    admin_messages = 0
+    conversation_lengths = []
+
+    for c in candidates:
+        history = c.history or []
+        total_messages += len(history)
+        conversation_lengths.append(len(history))
+        for m in history:
+            sender = m.get("from")
+            if sender == "bot":
+                bot_messages += 1
+            elif sender == "user":
+                user_messages += 1
+            elif sender == "admin":
+                admin_messages += 1
+
+    average_length = round(sum(conversation_lengths) / total_users, 2) if total_users > 0 else 0
+
+    sent = candidates.filter(status='sent').count()
+    replied = candidates.filter(status='replied').count()
+    escalated = candidates.filter(status='escalated').count()
+
+    # ✅ Define "Completed Onboarding" as having at least 6 bot replies
+    completed_onboarding = sum(
+        1 for c in candidates if sum(1 for m in (c.history or []) if m.get("from") == "bot") >= 6
+    )
+
+    with_reason = sum(1 for c in candidates if c.status == 'escalated' and c.escalation_reason)
+
+    return JsonResponse({
+        "summary": {
+            "total_users": total_users,
+            "total_messages": total_messages,
+            "average_conversation_length": average_length,
+            "bot_messages": bot_messages,
+            "user_messages": user_messages,
+            "admin_messages": admin_messages,
+        },
+        "engagement_funnel": {
+            "sent": sent,
+            "replied": replied,
+            "completed_onboarding": completed_onboarding,
+            "escalated": escalated
+        },
+        "escalation_stats": {
+            "total_escalated": escalated,
+            "with_reason": with_reason
+        }
+    })
+
+
