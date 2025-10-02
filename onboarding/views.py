@@ -4,7 +4,6 @@ import os
 import json
 import requests
 import pandas as pd
-import random
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
 from django.http import HttpResponse, JsonResponse
@@ -28,16 +27,25 @@ with open("onboarding/data/inplace_onboarding.txt", "r", encoding="utf-8") as f:
     onboarding_data = f.read()
 
 
-def detect_language(text):
-    italian_keywords = ["ciao", "nome", "cognome", "documento", "firma", "codice", "residenza", "comune"]
-    score = sum(kw in text.lower() for kw in italian_keywords)
-    return "it" if score > 1 else "en"
+# ---------------------------
+# Utilities (language + http)
+# ---------------------------
 
-
-# -----------------------------
-# ✨ Human-like small-talk layer
-# -----------------------------
-random.seed()
+def detect_language(text: str) -> str:
+    """Simple, forgiving detector tuned for this project. Defaults to Italian."""
+    t = (text or "").strip().lower()
+    if not t:
+        return "it"
+    italian_hits = [
+        "ciao", "grazie", "buongiorno", "buonasera", "salve",
+        "nome", "cognome", "documento", "firma", "codice", "residenza", "comune"
+    ]
+    english_hits = ["hello", "hi", "hey", "thanks", "good morning", "good evening"]
+    if any(kw in t for kw in italian_hits):
+        return "it"
+    if any(kw in t for kw in english_hits):
+        return "en"
+    return "it"
 
 def send_text_message(phone_number: str, body: str):
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
@@ -56,83 +64,205 @@ def send_text_message(phone_number: str, body: str):
     r.raise_for_status()
     return r.json()
 
-def smart_lang(text: str):
-    return "it" if detect_language(text) == "it" else "en"
 
-SMALLTALK_PATTERNS = {
-    "greeting": ["hi", "hello", "hey", "ciao", "buongiorno", "salve", "hey there"],
-    "thanks": ["thanks", "thank you", "grazie", "thx", "thanks a lot", "mille grazie"],
-    "bye": ["bye", "goodbye", "arrivederci", "ciao ciao", "see ya", "see you"],
-    "ok": ["ok", "okay", "va bene", "perfetto", "done", "got it", "ricevuto", "sure"]
-}
+# ---------------------------
+# Orchestrated GPT Responding
+# ---------------------------
 
-SMALLTALK_RESPONSES = {
-    "it": {
-        "greeting": [
-            "Ciao {name}! 👋 Come stai? Vuoi iniziare l’onboarding ora?",
-            "Ehi {name}! 😊 Sono qui per aiutarti con InPlace. Da dove partiamo?",
-            "Ciao! Se vuoi, posso guidarti passo-passo. Preferisci iniziare o fare domande?"
-        ],
-        "thanks": [
-            "Di nulla! 🙌 Se vuoi, posso procedere con il prossimo passaggio.",
-            "Con piacere! Hai bisogno di altro prima di continuare?",
-            "Felice di aiutarti. Pronti a proseguire?"
-        ],
-        "bye": [
-            "A presto {name}! 👋 Se ti serve, scrivimi quando vuoi.",
-            "Va bene, ci sentiamo! Buona giornata. 🌟",
-            "Grazie a te! Quando vuoi riprendiamo da dove eravamo."
-        ],
-        "ok": [
-            "Perfetto! Vuoi che parta con il primo step?",
-            "Ricevuto. Procedo col prossimo passaggio?",
-            "Ottimo! Dimmi quando sei pronto/a a iniziare."
-        ]
-    },
-    "en": {
-        "greeting": [
-            "Hey {name}! 👋 How’s it going? Ready to start onboarding?",
-            "Hi! 😊 I’m here to help with InPlace. Want me to guide you step-by-step?",
-            "Hello {name}! We can begin now or I can answer quick questions first."
-        ],
-        "thanks": [
-            "You’re welcome! 🙌 Shall we continue to the next step?",
-            "Anytime! Need anything else before we move on?",
-            "Glad to help. Ready to proceed?"
-        ],
-        "bye": [
-            "Talk soon, {name}! 👋 Ping me anytime.",
-            "No worries—have a great day! 🌟",
-            "Thanks! We’ll pick up right where we left off."
-        ],
-        "ok": [
-            "Great! Want me to start with step one?",
-            "Got it. Should I move to the next step?",
-            "Awesome—say the word when you’re ready."
-        ]
-    }
-}
+def get_state_objects(history):
+    """
+    Extract any prior 'state' or 'summary' objects from history.
+    We store them as messages like: {"from": "state", "text": "{json}"}
+    and {"from": "summary", "text": "..."}
+    """
+    last_state = None
+    last_summary = None
+    if not history:
+        return None, None
+    for m in history:
+        if m.get("from") == "state":
+            try:
+                last_state = json.loads(m.get("text", "{}"))
+            except Exception:
+                pass
+        elif m.get("from") == "summary":
+            last_summary = m.get("text", "")
+    return last_state, last_summary
 
-FIRST_WELCOME = {
-    "it": [
-        "Ciao {name}! 👋 Sono il tuo assistente InPlace. Preferisci iniziare subito o hai domande veloci?",
-        "Benvenuto/a! Posso guidarti passo-passo con documenti e firme. Da dove partiamo?"
-    ],
-    "en": [
-        "Hey {name}! 👋 I’m your InPlace assistant. Want to start now or ask a quick question first?",
-        "Welcome! I can guide you step-by-step through docs and signatures. Where should we begin?"
-    ]
-}
+def build_dialogue_messages(candidate, user_msg: str, lang: str):
+    """
+    Build the messages list for GPT with:
+    - strong System (persona + rules)
+    - developer-like Orchestrator instruction to output JSON
+    - optional 'summary' context
+    - a short recent chat window (to keep tokens lean)
+    """
+    # Retrieve memory
+    history = candidate.history or []
+    last_state, last_summary = get_state_objects(history)
 
-def match_smalltalk(text: str):
-    t = text.strip().lower()
-    # short messages are more likely small-talk
-    if len(t) <= 60:
-        for intent, keywords in SMALLTALK_PATTERNS.items():
-            for kw in keywords:
-                if kw in t:
-                    return intent
-    return None
+    # Short recent window (exclude state/summary to avoid noise)
+    recent = [m for m in history if m.get("from") in {"user", "bot", "admin"}][-12:]
+
+    # Persona & style (bilingual)
+    base_style_it = """
+Sei un assistente per l’onboarding InPlace.it: naturale, empatico, concreto.
+Regole:
+- Niente frasi robotiche o ripetute; varia sempre le formulazioni.
+- Mantieni risposte brevi (1–6 frasi) e specifiche al contesto.
+- Ricorda quanto detto prima: se l’utente dice “ok/va bene/grazie”, capisci il contesto e proponi la prossima azione coerente.
+- Non chiedere le stesse info due volte se già fornite.
+- Offri sempre un prossimo passo chiaro (CTA breve).
+- Se l’utente chiede un umano, offri l’escalation.
+- Non inventare dati non presenti nel knowledge base.
+"""
+    base_style_en = """
+You are an InPlace.it onboarding assistant: natural, friendly, concrete.
+Rules:
+- No robotic or repetitive phrasing; always vary wording.
+- Keep replies short (1–6 sentences) and context-specific.
+- Remember conversation context: if user says “ok/thanks/got it”, move forward coherently.
+- Do not ask for info twice if already provided.
+- Always end with a clear next step (short CTA).
+- If the user asks for a human, offer escalation.
+- Do not make up facts not present in the knowledge base.
+"""
+
+    system_prompt = f"""
+{base_style_it if lang == "it" else base_style_en}
+
+Knowledge base:
+{onboarding_data}
+"""
+
+    # Orchestrator instruction: force JSON with reply + state
+    orchestrator = f"""
+You must output ONLY valid JSON with this schema:
+
+{{
+  "reply": "string - the user-facing answer, in {'Italian' if lang=='it' else 'English'} only, concise and human-like",
+  "intent": "string - inferred user intent (e.g., greeting, proceed_step, document_help, thanks, goodbye, other)",
+  "language": "{lang}",
+  "next_step": "string - suggested next action (e.g., ask for doc X, confirm step Y)",
+  "state_update": {{
+      "step": "string or null - current onboarding step if applicable",
+      "flags": {{"wants_human": false, "confused": false, "frustrated": false}},
+      "notes": "string - brief memory to remember going forward (max 200 chars)"
+  }}
+}}
+
+Behavioral rules:
+- If the message is a greeting or thanks, DO NOT start over; continue from prior context or propose a sensible next step.
+- Avoid repeating the same generic greeting or apology across turns.
+- Use the prior summary/state to stay consistent.
+- Keep tone warm, not formal; no over-apologies.
+"""
+
+    messages = [{"role": "system", "content": system_prompt},
+                {"role": "system", "content": orchestrator}]
+
+    # Add memory summary if available
+    if last_summary:
+        messages.append({"role": "system", "content": f"Conversation summary so far:\n{last_summary}"})
+    # Add last state if available
+    if last_state:
+        messages.append({"role": "system", "content": f"State memory:\n{json.dumps(last_state, ensure_ascii=False)}"})
+
+    # Add short recent transcript
+    if recent:
+        transcript = "\n".join([f"{m['from']}: {m['text']}" for m in recent])
+        messages.append({"role": "system", "content": f"Recent transcript:\n{transcript}"})
+
+    # Current user message
+    messages.append({"role": "user", "content": user_msg})
+
+    return messages
+
+def summarize_if_needed(candidate):
+    """If history is getting long, create/update a rolling summary entry."""
+    history = candidate.history or []
+    # We’ll summarize when there are > 60 messages and every ~20 new messages
+    if len(history) < 60:
+        return
+    # Extract the last summary index
+    last_summary_idx = None
+    for i, m in enumerate(history):
+        if m.get("from") == "summary":
+            last_summary_idx = i
+    # Get last 40 relevant messages after the last summary
+    start = (last_summary_idx + 1) if last_summary_idx is not None else 0
+    window = [m for m in history[start:] if m.get("from") in {"user", "bot", "admin"}][-40:]
+    if not window:
+        return
+    transcript = "\n".join([f"{m['from']}: {m['text']}" for m in window])
+
+    prompt = f"""
+Summarize this conversation window into 4–7 bullet points (max 120 words), preserving promises, decisions, user preferences, and current step. Keep {'Italian' if detect_language(transcript)=='it' else 'English'}.
+
+--- WINDOW ---
+{transcript}
+--- END ---
+"""
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            timeout=12,
+            temperature=0.3,
+            messages=[{"role": "system", "content": "You produce concise, faithful summaries."},
+                      {"role": "user", "content": prompt}]
+        )
+        summary = res.choices[0].message.content.strip()
+        # Upsert the summary (append a new summary entry)
+        candidate.history.append({"from": "summary", "text": summary})
+        candidate.save()
+    except Exception as e:
+        print("⚠️ Summary failed:", e)
+
+
+def orchestrated_reply(candidate, incoming_msg: str, lang: str):
+    """
+    Single GPT call to produce a JSON with reply + state.
+    Stores state memory and returns the reply text.
+    """
+    messages = build_dialogue_messages(candidate, incoming_msg, lang)
+    try:
+        res = client.chat.completions.create(
+            model="gpt-5",
+            timeout=20,
+            temperature=0.7,       # varied, natural
+            top_p=1,
+            frequency_penalty=0.7, # anti-repetition
+            presence_penalty=0.3,
+            messages=messages
+        )
+        raw = res.choices[0].message.content.strip()
+        print("🧠 Orchestrator RAW:", raw)
+
+        # Expect JSON only; if it fails, treat as plain reply
+        data = None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {"reply": raw, "state_update": None, "language": lang, "intent": "other", "next_step": ""}
+
+        reply = (data.get("reply") or "").strip()
+        if not reply:
+            reply = "Ok." if lang == "en" else "Ok."
+
+        # Persist state update (if any)
+        su = data.get("state_update")
+        if su:
+            try:
+                candidate.history.append({"from": "state", "text": json.dumps(su, ensure_ascii=False)})
+                candidate.save()
+            except Exception as e:
+                print("⚠️ Failed to save state:", e)
+
+        return reply
+
+    except Exception as e:
+        print("[GPT ERROR]:", e)
+        return "Sorry, something went wrong. Please try again later." if lang == "en" else "Spiacente, si è verificato un errore. Riprova più tardi."
 
 
 def send_onboarding_template(phone_number, name):
@@ -220,41 +350,7 @@ def meta_webhook(request):
                 candidate.history.append({"from": "user", "text": incoming_msg})
                 candidate.save()
 
-                # 🔹 Human-like first inbound welcome (before escalation/GPT)
-                lang = smart_lang(incoming_msg)
-                display_name = (candidate.name or "").strip() or ("Amico" if lang == "it" else "Friend")
-
-                is_first_inbound = len(candidate.history) == 1  # we just appended the first user msg
-                if is_first_inbound:
-                    try:
-                        text = random.choice(FIRST_WELCOME.get(lang, []))
-                        text = text.format(name=display_name)
-                        send_text_message(sender_id, text)
-                        candidate.history.append({"from": "bot", "text": text})
-                        candidate.status = "replied"
-                        candidate.save()
-                        # Stop here to avoid double reply on the very first "hi"
-                        return JsonResponse({"status": "welcomed"})
-                    except Exception as e:
-                        print(f"⚠️ First-welcome send failed: {e}")
-
-                # 🔹 Human-like small-talk interception (hi/thanks/ok/bye)
-                intent = match_smalltalk(incoming_msg)
-                if intent:
-                    try:
-                        choices = SMALLTALK_RESPONSES.get(lang, {}).get(intent, [])
-                        if choices:
-                            text = random.choice(choices).format(name=display_name)
-                            send_text_message(sender_id, text)
-                            candidate.history.append({"from": "bot", "text": text})
-                            candidate.status = "replied"
-                            candidate.save()
-                            # Short-circuit: small-talk answered, no need for GPT
-                            return JsonResponse({"status": "smalltalk"})
-                    except Exception as e:
-                        print(f"⚠️ Smalltalk send failed: {e}")
-
-                # ✅ SMART ESCALATION SYSTEM (Scored)
+                # ✅ SMART ESCALATION SYSTEM (Scored) — unchanged
                 should_escalate = False
                 escalation_reason = ""
 
@@ -270,10 +366,10 @@ You are an escalation analyzer for a support chatbot.
 
 You will be given a conversation (last few messages) between a user and a chatbot. Return a JSON response with these four fields:
 
-- frustration_score (0 to 10): how angry, annoyed, or upset the user seems
-- human_request_score (0 to 10): how much the user is asking to talk to a human
-- confusion_score (0 to 10): how unclear or lost the user seems
-- repeat_count (0 to 10): how many times the user seems to have asked the same thing
+- frustration_score (0 to 10)
+- human_request_score (0 to 10)
+- confusion_score (0 to 10)
+- repeat_count (0 to 10)
 
 Only escalate if the scores are high.
 DO NOT escalate if the user is just asking for help, trying again, or being polite.
@@ -292,7 +388,7 @@ Your reply must be only a JSON object like:
 """
 
                         result = client.chat.completions.create(
-                            model="gpt-4o",
+                            model="gpt-5",
                             timeout=10,
                             messages=[
                                 {"role": "system", "content": classification_prompt}
@@ -329,60 +425,16 @@ Your reply must be only a JSON object like:
                     print("⛔ Bot paused for this user (already escalated).")
                     return JsonResponse({"status": "paused"})
 
-                # ✅ CHATBOT REPLY (Normal): upgraded style prompt + anti-repetition
-                lang = lang  # keep previously detected language
-                base_style_it = """
-Sei un assistente InPlace.it.
-Stile: naturale, empatico, conciso. Evita frasi robotiche o ripetitive.
-Varia le formulazioni: non ripetere la stessa frase di saluto o chiusura.
-Usa frasi brevi e proponi sempre il prossimo passo.
-Non scusarti se non necessario. Non inventare dati.
-Se l’utente chiede un umano, offri l’escalation.
-"""
-                base_style_en = """
-You are an InPlace.it assistant.
-Style: natural, friendly, concise. Avoid robotic or repetitive phrasing.
-Vary wording: never repeat the same greeting or closing.
-Use short sentences and always offer the next step.
-Don’t over-apologize. Don’t make up facts.
-If the user asks for a human, offer escalation.
-"""
+                # ✅ Orchestrated normal reply (no hard-coded small-talk)
+                lang = detect_language(incoming_msg)
+                reply = orchestrated_reply(candidate, incoming_msg, lang)
 
-                system_prompt = f"""
-{base_style_it if lang == "it" else base_style_en}
-
-Knowledge base:
-{onboarding_data}
-
-When replying:
-- Detect the user’s intent (onboarding step, docs, status, support).
-- Keep replies to 1–3 short paragraphs max.
-- End with a helpful next action (e.g., “Vuoi iniziare dal documento X?” / “Shall we start with document X?”).
-"""
-
-                try:
-                    chat_completion = client.chat.completions.create(
-                        model="gpt-4o",
-                        timeout=15,
-                        temperature=0.7,
-                        top_p=1,
-                        frequency_penalty=0.6,
-                        presence_penalty=0.2,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": incoming_msg}
-                        ]
-                    )
-                    reply = chat_completion.choices[0].message.content.strip()
-                    print("[GPT REPLY]:", reply)
-                except Exception as e:
-                    reply = "Sorry, something went wrong. Please try again later." if lang == "en" else "Spiacente, si è verificato un errore. Riprova più tardi."
-                    print("[GPT ERROR]:", e)
-
+                # Save reply
                 candidate.history.append({"from": "bot", "text": reply})
                 candidate.status = "replied"
                 candidate.save()
 
+                # Send reply
                 headers = {
                     "Authorization": f"Bearer {ACCESS_TOKEN}",
                     "Content-Type": "application/json"
@@ -396,6 +448,9 @@ When replying:
                 }
                 r = requests.post(url, json=payload, headers=headers)
                 print("✅ Replied:", r.status_code, r.text)
+
+                # Opportunistic memory compression
+                summarize_if_needed(candidate)
 
         except Exception as e:
             print("❌ Error in meta_webhook main handler:", e)
