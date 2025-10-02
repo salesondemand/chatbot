@@ -5,14 +5,16 @@ import json
 import requests
 import pandas as pd
 from dotenv import load_dotenv
-from openai import OpenAI, APIConnectionError, APITimeoutError
+from openai import OpenAI
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 from .models import Candidate
 
-# Load environment variables
+# ==============================
+# Env / Client
+# ==============================
 load_dotenv()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
@@ -23,29 +25,39 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 print("🔑 OpenAI key loaded:", bool(client.api_key))
 
+# Swap models here if needed
+MAIN_MODEL = os.getenv("MAIN_MODEL", "gpt-5")       # "gpt-5" or "gpt-4o"
+CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "gpt-5-mini")  # cheap classifier; or "gpt-4o-mini"
+
 with open("onboarding/data/inplace_onboarding.txt", "r", encoding="utf-8") as f:
     onboarding_data = f.read()
 
 
-# ---------------------------
-# Utilities (language + http)
-# ---------------------------
+# ==============================
+# Utilities (Lang, HTTP, Params)
+# ==============================
 
 def detect_language(text: str) -> str:
-    """Simple, forgiving detector tuned for this project. Defaults to Italian."""
+    """
+    Forgiving detector tuned for EN/IT. Returns 'it' by default.
+    We choose the language for THIS message, so the bot can switch mid-chat naturally.
+    """
     t = (text or "").strip().lower()
     if not t:
         return "it"
-    italian_hits = [
+    it_markers = [
         "ciao", "grazie", "buongiorno", "buonasera", "salve",
-        "nome", "cognome", "documento", "firma", "codice", "residenza", "comune"
+        "nome", "cognome", "documento", "firma", "codice",
+        "residenza", "comune", "registrati", "verifica", "email"
     ]
-    english_hits = ["hello", "hi", "hey", "thanks", "good morning", "good evening"]
-    if any(kw in t for kw in italian_hits):
+    en_markers = ["hello", "hi", "hey", "thanks", "thank you", "good morning", "good evening", "register", "verify"]
+    if any(kw in t for kw in it_markers):
         return "it"
-    if any(kw in t for kw in english_hits):
+    if any(kw in t for kw in en_markers):
         return "en"
-    return "it"
+    # fallback based on characters: very rough but helps for short tokens
+    return "en" if any(c in t for c in "qwxjk") else "it"
+
 
 def send_text_message(phone_number: str, body: str):
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
@@ -65,15 +77,28 @@ def send_text_message(phone_number: str, body: str):
     return r.json()
 
 
-# ---------------------------
-# Orchestrated GPT Responding
-# ---------------------------
+def gpt_params_for_model(model_name: str, messages, timeout: int = 20):
+    """
+    GPT-5 via chat.completions currently only supports default sampling params.
+    GPT-4o supports temperature/top_p/penalties. This helper picks the right kwargs.
+    """
+    base = dict(model=model_name, timeout=timeout, messages=messages)
+    if "gpt-5" in model_name:
+        return base
+    # For 4o and others, enable anti-repetition + natural variety
+    base.update(dict(temperature=0.7, top_p=1, frequency_penalty=0.7, presence_penalty=0.3))
+    return base
+
+
+# ==============================
+# Lightweight memory in history
+# ==============================
 
 def get_state_objects(history):
     """
-    Extract any prior 'state' or 'summary' objects from history.
-    We store them as messages like: {"from": "state", "text": "{json}"}
-    and {"from": "summary", "text": "..."}
+    Read prior 'state' and 'summary' items from history.
+    Stored as: {"from":"state","text":"{json}"}, {"from":"summary","text":"..."}
+    Returns (last_state_dict_or_None, last_summary_str_or_None)
     """
     last_state = None
     last_summary = None
@@ -89,107 +114,17 @@ def get_state_objects(history):
             last_summary = m.get("text", "")
     return last_state, last_summary
 
-def build_dialogue_messages(candidate, user_msg: str, lang: str):
-    """
-    Build the messages list for GPT with:
-    - strong System (persona + rules)
-    - developer-like Orchestrator instruction to output JSON
-    - optional 'summary' context
-    - a short recent chat window (to keep tokens lean)
-    """
-    # Retrieve memory
-    history = candidate.history or []
-    last_state, last_summary = get_state_objects(history)
-
-    # Short recent window (exclude state/summary to avoid noise)
-    recent = [m for m in history if m.get("from") in {"user", "bot", "admin"}][-12:]
-
-    # Persona & style (bilingual)
-    base_style_it = """
-Sei un assistente per l’onboarding InPlace.it: naturale, empatico, concreto.
-Regole:
-- Niente frasi robotiche o ripetute; varia sempre le formulazioni.
-- Mantieni risposte brevi (1–6 frasi) e specifiche al contesto.
-- Ricorda quanto detto prima: se l’utente dice “ok/va bene/grazie”, capisci il contesto e proponi la prossima azione coerente.
-- Non chiedere le stesse info due volte se già fornite.
-- Offri sempre un prossimo passo chiaro (CTA breve).
-- Se l’utente chiede un umano, offri l’escalation.
-- Non inventare dati non presenti nel knowledge base.
-"""
-    base_style_en = """
-You are an InPlace.it onboarding assistant: natural, friendly, concrete.
-Rules:
-- No robotic or repetitive phrasing; always vary wording.
-- Keep replies short (1–6 sentences) and context-specific.
-- Remember conversation context: if user says “ok/thanks/got it”, move forward coherently.
-- Do not ask for info twice if already provided.
-- Always end with a clear next step (short CTA).
-- If the user asks for a human, offer escalation.
-- Do not make up facts not present in the knowledge base.
-"""
-
-    system_prompt = f"""
-{base_style_it if lang == "it" else base_style_en}
-
-Knowledge base:
-{onboarding_data}
-"""
-
-    # Orchestrator instruction: force JSON with reply + state
-    orchestrator = f"""
-You must output ONLY valid JSON with this schema:
-
-{{
-  "reply": "string - the user-facing answer, in {'Italian' if lang=='it' else 'English'} only, concise and human-like",
-  "intent": "string - inferred user intent (e.g., greeting, proceed_step, document_help, thanks, goodbye, other)",
-  "language": "{lang}",
-  "next_step": "string - suggested next action (e.g., ask for doc X, confirm step Y)",
-  "state_update": {{
-      "step": "string or null - current onboarding step if applicable",
-      "flags": {{"wants_human": false, "confused": false, "frustrated": false}},
-      "notes": "string - brief memory to remember going forward (max 200 chars)"
-  }}
-}}
-
-Behavioral rules:
-- If the message is a greeting or thanks, DO NOT start over; continue from prior context or propose a sensible next step.
-- Avoid repeating the same generic greeting or apology across turns.
-- Use the prior summary/state to stay consistent.
-- Keep tone warm, not formal; no over-apologies.
-"""
-
-    messages = [{"role": "system", "content": system_prompt},
-                {"role": "system", "content": orchestrator}]
-
-    # Add memory summary if available
-    if last_summary:
-        messages.append({"role": "system", "content": f"Conversation summary so far:\n{last_summary}"})
-    # Add last state if available
-    if last_state:
-        messages.append({"role": "system", "content": f"State memory:\n{json.dumps(last_state, ensure_ascii=False)}"})
-
-    # Add short recent transcript
-    if recent:
-        transcript = "\n".join([f"{m['from']}: {m['text']}" for m in recent])
-        messages.append({"role": "system", "content": f"Recent transcript:\n{transcript}"})
-
-    # Current user message
-    messages.append({"role": "user", "content": user_msg})
-
-    return messages
 
 def summarize_if_needed(candidate):
-    """If history is getting long, create/update a rolling summary entry."""
+    """Occasional rolling summary to keep context coherent without long histories."""
     history = candidate.history or []
-    # We’ll summarize when there are > 60 messages and every ~20 new messages
     if len(history) < 60:
         return
-    # Extract the last summary index
+    # Find last summary index
     last_summary_idx = None
     for i, m in enumerate(history):
         if m.get("from") == "summary":
             last_summary_idx = i
-    # Get last 40 relevant messages after the last summary
     start = (last_summary_idx + 1) if last_summary_idx is not None else 0
     window = [m for m in history[start:] if m.get("from") in {"user", "bot", "admin"}][-40:]
     if not window:
@@ -197,7 +132,7 @@ def summarize_if_needed(candidate):
     transcript = "\n".join([f"{m['from']}: {m['text']}" for m in window])
 
     prompt = f"""
-Summarize this conversation window into 4–7 bullet points (max 120 words), preserving promises, decisions, user preferences, and current step. Keep {'Italian' if detect_language(transcript)=='it' else 'English'}.
+Summarize this conversation window into 4–7 bullet points (<=120 words), preserving decisions, user preferences, and current step. Keep {'Italian' if detect_language(transcript) == 'it' else 'English'}.
 
 --- WINDOW ---
 {transcript}
@@ -205,51 +140,150 @@ Summarize this conversation window into 4–7 bullet points (max 120 words), pre
 """
     try:
         res = client.chat.completions.create(
-            model="gpt-4o",
-            timeout=12,
-            temperature=0.3,
-            messages=[{"role": "system", "content": "You produce concise, faithful summaries."},
-                      {"role": "user", "content": prompt}]
+            **gpt_params_for_model(CLASSIFIER_MODEL, [
+                {"role": "system", "content": "You produce concise, faithful summaries."},
+                {"role": "user", "content": prompt}
+            ], timeout=12)
         )
         summary = res.choices[0].message.content.strip()
-        # Upsert the summary (append a new summary entry)
         candidate.history.append({"from": "summary", "text": summary})
         candidate.save()
     except Exception as e:
         print("⚠️ Summary failed:", e)
 
 
-def orchestrated_reply(candidate, incoming_msg: str, lang: str):
+# ==============================
+# Orchestrated GPT Responding
+# ==============================
+
+def build_dialogue_messages(candidate, user_msg: str, lang: str, is_first_inbound: bool):
     """
-    Single GPT call to produce a JSON with reply + state.
-    Stores state memory and returns the reply text.
+    Build messages for GPT:
+    - Persona + rules (bilingual, human-like, no repetition)
+    - Orchestrator JSON instruction
+    - Optional memory summary + last state
+    - Recent transcript
+    - First-contact guidance (if first inbound)
     """
-    messages = build_dialogue_messages(candidate, incoming_msg, lang)
+    history = candidate.history or []
+    last_state, last_summary = get_state_objects(history)
+    recent = [m for m in history if m.get("from") in {"user", "bot", "admin"}][-12:]
+
+    base_style_it = """
+Sei un assistente per l’onboarding InPlace.it, bilingue (Italiano/English).
+Regole:
+- Riconosci la lingua del messaggio corrente e rispondi in quella lingua. Se l’utente cambia lingua, cambia anche tu.
+- Niente frasi robotiche o ripetitive; varia le formulazioni. Evita “Come posso aiutarti oggi?”.
+- Risposte brevi (1–6 frasi), specifiche al contesto; non ripetere saluti.
+- Ricorda quanto deciso prima e proponi un prossimo passo chiaro e coerente.
+- Non chiedere le stesse info due volte se già fornite.
+- Se l’utente chiede un umano, offri l’escalation. Non inventare dati.
+"""
+    base_style_en = """
+You are an InPlace.it onboarding assistant, bilingual (English/Italian).
+Rules:
+- Detect the language of the CURRENT message and reply in that language. If the user switches languages mid-chat, you also switch.
+- No robotic or repetitive phrasing; avoid “How can I assist you today?”. Vary wording.
+- Keep replies short (1–6 sentences), context-specific; don’t repeat greetings.
+- Remember prior decisions and always propose a clear, coherent next step.
+- Don’t ask for the same info twice if already provided.
+- If the user asks for a human, offer escalation. Do not fabricate facts.
+"""
+
+    # First-contact guidance (works even if first msg is a question)
+    first_contact_it = """
+Se questo è il PRIMO messaggio dell’utente:
+- Se il messaggio è un semplice saluto o apertura (“ciao”, “buongiorno”, ecc.), rispondi con un benvenuto caldo e breve, spiega in 1 riga come puoi aiutare (onboarding InPlace: registrazione, documenti, firme, accessi) e chiedi gentilmente da dove vuole iniziare.
+- Se il messaggio è già una domanda/azione (non un saluto), vai dritto al punto: rispondi e proponi il passo successivo senza introdurre formule generiche.
+"""
+    first_contact_en = """
+If this is the user’s FIRST message:
+- If it’s a simple greeting/opener (“hi”, “hello”, etc.), reply with a warm, brief welcome, explain in 1 line how you help (InPlace onboarding: registration, docs, signatures, access) and ask politely where they want to begin.
+- If it’s already a question/action (not just a greeting), get straight to it: answer and propose the next step—no generic intros.
+"""
+
+    orchestrator = f"""
+Output ONLY valid JSON with this schema:
+
+{{
+  "reply": "string - user-facing answer in {'Italian' if lang=='it' else 'English'}, concise, human-like",
+  "intent": "string - inferred intent (greeting, registration_help, docs_help, signature_help, access_help, proceed_step, thanks, goodbye, other)",
+  "next_step": "string - suggested next move (e.g., ask for doc X, confirm step Y)",
+  "state_update": {{
+      "step": "string|null - current onboarding step if applicable",
+      "flags": {{"wants_human": false, "confused": false, "frustrated": false}},
+      "notes": "string - short memory to keep context (<=200 chars)"
+  }}
+}}
+
+Behavioral rules:
+- Use current-message language; if the user switches languages, switch too automatically.
+- Never claim you can help only in one language—you are bilingual.
+- Do NOT restart the flow on “ok/thanks/hi”. Continue smoothly with a coherent next step.
+- Avoid repetitive greetings or apologies.
+"""
+
+    system_prompt = (
+        (base_style_it if lang == "it" else base_style_en)
+        + "\n"
+        + (first_contact_it if lang == "it" else first_contact_en)
+        + "\n\nKnowledge base:\n"
+        + onboarding_data
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": orchestrator}
+    ]
+
+    if last_summary:
+        messages.append({"role": "system", "content": f"Conversation summary so far:\n{last_summary}"})
+    if last_state:
+        messages.append({"role": "system", "content": f"State memory:\n{json.dumps(last_state, ensure_ascii=False)}"})
+    if recent:
+        transcript = "\n".join([f"{m['from']}: {m['text']}" for m in recent])
+        messages.append({"role": "system", "content": f"Recent transcript:\n{transcript}"})
+
+    # Explicit first-contact flag helps the model choose tone without being generic
+    if is_first_inbound:
+        messages.append({"role": "system", "content": "FIRST_CONTACT: true"})
+    else:
+        messages.append({"role": "system", "content": "FIRST_CONTACT: false"})
+
+    messages.append({"role": "user", "content": user_msg})
+    return messages
+
+
+def orchestrated_reply(candidate, incoming_msg: str):
+    """
+    One GPT call that returns a JSON with reply + state and saves state in history.
+    Language is selected from the CURRENT message so we can switch mid-chat.
+    """
+    history = candidate.history or []
+    # first user message if count of user entries == 1 after appending
+    user_msgs = [m for m in history if m.get("from") == "user"]
+    is_first_inbound = len(user_msgs) == 1
+    lang = detect_language(incoming_msg)
+
+    messages = build_dialogue_messages(candidate, incoming_msg, lang, is_first_inbound)
+
     try:
         res = client.chat.completions.create(
-            model="gpt-4o",
-            timeout=20,
-            temperature=0.7,       # varied, natural
-            top_p=1,
-            frequency_penalty=0.7, # anti-repetition
-            presence_penalty=0.3,
-            messages=messages
+            **gpt_params_for_model(MAIN_MODEL, messages, timeout=20)
         )
         raw = res.choices[0].message.content.strip()
         print("🧠 Orchestrator RAW:", raw)
 
-        # Expect JSON only; if it fails, treat as plain reply
-        data = None
         try:
             data = json.loads(raw)
         except Exception:
-            data = {"reply": raw, "state_update": None, "language": lang, "intent": "other", "next_step": ""}
+            data = {"reply": raw, "state_update": None, "intent": "other", "next_step": ""}
 
         reply = (data.get("reply") or "").strip()
         if not reply:
             reply = "Ok." if lang == "en" else "Ok."
 
-        # Persist state update (if any)
+        # Persist state
         su = data.get("state_update")
         if su:
             try:
@@ -264,6 +298,10 @@ def orchestrated_reply(candidate, incoming_msg: str, lang: str):
         print("[GPT ERROR]:", e)
         return "Sorry, something went wrong. Please try again later." if lang == "en" else "Spiacente, si è verificato un errore. Riprova più tardi."
 
+
+# ==============================
+# Meta Template (unchanged)
+# ==============================
 
 def send_onboarding_template(phone_number, name):
     print(f"🔔 Sending message to: {phone_number}")
@@ -314,6 +352,10 @@ def send_onboarding_template(phone_number, name):
     return response.json()
 
 
+# ==============================
+# Webhook
+# ==============================
+
 @csrf_exempt
 def meta_webhook(request):
     if request.method == 'GET':
@@ -350,7 +392,7 @@ def meta_webhook(request):
                 candidate.history.append({"from": "user", "text": incoming_msg})
                 candidate.save()
 
-                # ✅ SMART ESCALATION SYSTEM (Scored) — unchanged
+                # ===== Escalation (unchanged) =====
                 should_escalate = False
                 escalation_reason = ""
 
@@ -364,35 +406,22 @@ def meta_webhook(request):
                         classification_prompt = f"""
 You are an escalation analyzer for a support chatbot.
 
-You will be given a conversation (last few messages) between a user and a chatbot. Return a JSON response with these four fields:
+Return JSON with:
+- frustration_score (0-10)
+- human_request_score (0-10)
+- confusion_score (0-10)
+- repeat_count (0-10)
 
-- frustration_score (0 to 10)
-- human_request_score (0 to 10)
-- confusion_score (0 to 10)
-- repeat_count (0 to 10)
-
-Only escalate if the scores are high.
-DO NOT escalate if the user is just asking for help, trying again, or being polite.
-
-Your reply must be only a JSON object like:
-{{
-  "frustration_score": 7,
-  "human_request_score": 2,
-  "confusion_score": 8,
-  "repeat_count": 3
-}}
+Escalate only if scores are high; do not escalate for polite help/thanks.
 
 --- CHAT START ---
 {chat_history_text}
 --- CHAT END ---
 """
-
                         result = client.chat.completions.create(
-                            model="gpt-4o",
-                            timeout=10,
-                            messages=[
+                            **gpt_params_for_model(CLASSIFIER_MODEL, [
                                 {"role": "system", "content": classification_prompt}
-                            ]
+                            ], timeout=10)
                         )
 
                         response_text = result.choices[0].message.content
@@ -415,9 +444,7 @@ Your reply must be only a JSON object like:
                     candidate.status = "escalated"
                     candidate.escalation_reason = escalation_reason
                     candidate.save()
-
                     send_escalation_email(candidate)
-
                     print(f"⛔ Escalated: {escalation_reason}")
                     return JsonResponse({"status": "paused"})
 
@@ -425,16 +452,14 @@ Your reply must be only a JSON object like:
                     print("⛔ Bot paused for this user (already escalated).")
                     return JsonResponse({"status": "paused"})
 
-                # ✅ Orchestrated normal reply (no hard-coded small-talk)
-                lang = detect_language(incoming_msg)
-                reply = orchestrated_reply(candidate, incoming_msg, lang)
+                # ===== Orchestrated normal reply =====
+                reply = orchestrated_reply(candidate, incoming_msg)
 
-                # Save reply
+                # Save + send
                 candidate.history.append({"from": "bot", "text": reply})
                 candidate.status = "replied"
                 candidate.save()
 
-                # Send reply
                 headers = {
                     "Authorization": f"Bearer {ACCESS_TOKEN}",
                     "Content-Type": "application/json"
@@ -449,7 +474,7 @@ Your reply must be only a JSON object like:
                 r = requests.post(url, json=payload, headers=headers)
                 print("✅ Replied:", r.status_code, r.text)
 
-                # Opportunistic memory compression
+                # Opportunistic compression
                 summarize_if_needed(candidate)
 
         except Exception as e:
@@ -457,6 +482,10 @@ Your reply must be only a JSON object like:
 
         return JsonResponse({"status": "received"})
 
+
+# ==============================
+# Admin / Upload / Reports (unchanged)
+# ==============================
 
 @csrf_exempt
 def upload_excel(request):
@@ -563,7 +592,7 @@ def resume_bot(request):
         candidate.status = 'replied'
         candidate.escalation_reason = None
 
-        # ✅ Trim chat history to remove old frustration context
+        # Trim chat history to remove old frustration context
         if candidate.history:
             candidate.history = candidate.history[-3:]  # keep only last 3 messages
 
@@ -588,6 +617,7 @@ def get_all_chats(request):
             "last_updated": c.last_updated.strftime("%Y-%m-%d %H:%M")
         })
     return JsonResponse(data, safe=False)
+
 
 from django.db.models import Count
 
@@ -620,7 +650,7 @@ def get_report_stats(request):
     replied = candidates.filter(status='replied').count()
     escalated = candidates.filter(status='escalated').count()
 
-    # ✅ Define "Completed Onboarding" as having at least 6 bot replies
+    # Define "Completed Onboarding" as having at least 6 bot replies
     completed_onboarding = sum(
         1 for c in candidates if sum(1 for m in (c.history or []) if m.get("from") == "bot") >= 6
     )
