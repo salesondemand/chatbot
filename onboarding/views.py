@@ -227,7 +227,7 @@ def orchestrated_reply(candidate, incoming_msg: str, lang: str):
     messages = build_dialogue_messages(candidate, incoming_msg, lang)
     try:
         res = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o",
             timeout=20,
             temperature=0.7,       # varied, natural
             top_p=1,
@@ -388,7 +388,7 @@ Your reply must be only a JSON object like:
 """
 
                         result = client.chat.completions.create(
-                            model="gpt-5",
+                            model="gpt-4o",
                             timeout=10,
                             messages=[
                                 {"role": "system", "content": classification_prompt}
