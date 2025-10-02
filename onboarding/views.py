@@ -4,6 +4,7 @@ import os
 import json
 import requests
 import pandas as pd
+import random
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
 from django.http import HttpResponse, JsonResponse
@@ -31,6 +32,107 @@ def detect_language(text):
     italian_keywords = ["ciao", "nome", "cognome", "documento", "firma", "codice", "residenza", "comune"]
     score = sum(kw in text.lower() for kw in italian_keywords)
     return "it" if score > 1 else "en"
+
+
+# -----------------------------
+# ✨ Human-like small-talk layer
+# -----------------------------
+random.seed()
+
+def send_text_message(phone_number: str, body: str):
+    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": phone_number,
+        "type": "text",
+        "text": {"body": body}
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    print(f"📨 Text send -> {phone_number}: {r.status_code} {r.text}")
+    r.raise_for_status()
+    return r.json()
+
+def smart_lang(text: str):
+    return "it" if detect_language(text) == "it" else "en"
+
+SMALLTALK_PATTERNS = {
+    "greeting": ["hi", "hello", "hey", "ciao", "buongiorno", "salve", "hey there"],
+    "thanks": ["thanks", "thank you", "grazie", "thx", "thanks a lot", "mille grazie"],
+    "bye": ["bye", "goodbye", "arrivederci", "ciao ciao", "see ya", "see you"],
+    "ok": ["ok", "okay", "va bene", "perfetto", "done", "got it", "ricevuto", "sure"]
+}
+
+SMALLTALK_RESPONSES = {
+    "it": {
+        "greeting": [
+            "Ciao {name}! 👋 Come stai? Vuoi iniziare l’onboarding ora?",
+            "Ehi {name}! 😊 Sono qui per aiutarti con InPlace. Da dove partiamo?",
+            "Ciao! Se vuoi, posso guidarti passo-passo. Preferisci iniziare o fare domande?"
+        ],
+        "thanks": [
+            "Di nulla! 🙌 Se vuoi, posso procedere con il prossimo passaggio.",
+            "Con piacere! Hai bisogno di altro prima di continuare?",
+            "Felice di aiutarti. Pronti a proseguire?"
+        ],
+        "bye": [
+            "A presto {name}! 👋 Se ti serve, scrivimi quando vuoi.",
+            "Va bene, ci sentiamo! Buona giornata. 🌟",
+            "Grazie a te! Quando vuoi riprendiamo da dove eravamo."
+        ],
+        "ok": [
+            "Perfetto! Vuoi che parta con il primo step?",
+            "Ricevuto. Procedo col prossimo passaggio?",
+            "Ottimo! Dimmi quando sei pronto/a a iniziare."
+        ]
+    },
+    "en": {
+        "greeting": [
+            "Hey {name}! 👋 How’s it going? Ready to start onboarding?",
+            "Hi! 😊 I’m here to help with InPlace. Want me to guide you step-by-step?",
+            "Hello {name}! We can begin now or I can answer quick questions first."
+        ],
+        "thanks": [
+            "You’re welcome! 🙌 Shall we continue to the next step?",
+            "Anytime! Need anything else before we move on?",
+            "Glad to help. Ready to proceed?"
+        ],
+        "bye": [
+            "Talk soon, {name}! 👋 Ping me anytime.",
+            "No worries—have a great day! 🌟",
+            "Thanks! We’ll pick up right where we left off."
+        ],
+        "ok": [
+            "Great! Want me to start with step one?",
+            "Got it. Should I move to the next step?",
+            "Awesome—say the word when you’re ready."
+        ]
+    }
+}
+
+FIRST_WELCOME = {
+    "it": [
+        "Ciao {name}! 👋 Sono il tuo assistente InPlace. Preferisci iniziare subito o hai domande veloci?",
+        "Benvenuto/a! Posso guidarti passo-passo con documenti e firme. Da dove partiamo?"
+    ],
+    "en": [
+        "Hey {name}! 👋 I’m your InPlace assistant. Want to start now or ask a quick question first?",
+        "Welcome! I can guide you step-by-step through docs and signatures. Where should we begin?"
+    ]
+}
+
+def match_smalltalk(text: str):
+    t = text.strip().lower()
+    # short messages are more likely small-talk
+    if len(t) <= 60:
+        for intent, keywords in SMALLTALK_PATTERNS.items():
+            for kw in keywords:
+                if kw in t:
+                    return intent
+    return None
 
 
 def send_onboarding_template(phone_number, name):
@@ -118,6 +220,40 @@ def meta_webhook(request):
                 candidate.history.append({"from": "user", "text": incoming_msg})
                 candidate.save()
 
+                # 🔹 Human-like first inbound welcome (before escalation/GPT)
+                lang = smart_lang(incoming_msg)
+                display_name = (candidate.name or "").strip() or ("Amico" if lang == "it" else "Friend")
+
+                is_first_inbound = len(candidate.history) == 1  # we just appended the first user msg
+                if is_first_inbound:
+                    try:
+                        text = random.choice(FIRST_WELCOME.get(lang, []))
+                        text = text.format(name=display_name)
+                        send_text_message(sender_id, text)
+                        candidate.history.append({"from": "bot", "text": text})
+                        candidate.status = "replied"
+                        candidate.save()
+                        # Stop here to avoid double reply on the very first "hi"
+                        return JsonResponse({"status": "welcomed"})
+                    except Exception as e:
+                        print(f"⚠️ First-welcome send failed: {e}")
+
+                # 🔹 Human-like small-talk interception (hi/thanks/ok/bye)
+                intent = match_smalltalk(incoming_msg)
+                if intent:
+                    try:
+                        choices = SMALLTALK_RESPONSES.get(lang, {}).get(intent, [])
+                        if choices:
+                            text = random.choice(choices).format(name=display_name)
+                            send_text_message(sender_id, text)
+                            candidate.history.append({"from": "bot", "text": text})
+                            candidate.status = "replied"
+                            candidate.save()
+                            # Short-circuit: small-talk answered, no need for GPT
+                            return JsonResponse({"status": "smalltalk"})
+                    except Exception as e:
+                        print(f"⚠️ Smalltalk send failed: {e}")
+
                 # ✅ SMART ESCALATION SYSTEM (Scored)
                 should_escalate = False
                 escalation_reason = ""
@@ -183,6 +319,9 @@ Your reply must be only a JSON object like:
                     candidate.status = "escalated"
                     candidate.escalation_reason = escalation_reason
                     candidate.save()
+
+                    send_escalation_email(candidate)
+
                     print(f"⛔ Escalated: {escalation_reason}")
                     return JsonResponse({"status": "paused"})
 
@@ -190,24 +329,45 @@ Your reply must be only a JSON object like:
                     print("⛔ Bot paused for this user (already escalated).")
                     return JsonResponse({"status": "paused"})
 
-                # ✅ CHATBOT REPLY (Normal)
-                lang = detect_language(incoming_msg)
+                # ✅ CHATBOT REPLY (Normal): upgraded style prompt + anti-repetition
+                lang = lang  # keep previously detected language
+                base_style_it = """
+Sei un assistente InPlace.it.
+Stile: naturale, empatico, conciso. Evita frasi robotiche o ripetitive.
+Varia le formulazioni: non ripetere la stessa frase di saluto o chiusura.
+Usa frasi brevi e proponi sempre il prossimo passo.
+Non scusarti se non necessario. Non inventare dati.
+Se l’utente chiede un umano, offri l’escalation.
+"""
+                base_style_en = """
+You are an InPlace.it assistant.
+Style: natural, friendly, concise. Avoid robotic or repetitive phrasing.
+Vary wording: never repeat the same greeting or closing.
+Use short sentences and always offer the next step.
+Don’t over-apologize. Don’t make up facts.
+If the user asks for a human, offer escalation.
+"""
+
                 system_prompt = f"""
-Sei un assistente virtuale esperto della piattaforma InPlace.it...
+{base_style_it if lang == "it" else base_style_en}
 
-Ecco le informazioni da tenere in memoria:
+Knowledge base:
 {onboarding_data}
-""" if lang == "it" else f"""
-You are a virtual assistant for InPlace.it onboarding...
 
-Here is all platform knowledge:
-{onboarding_data}
+When replying:
+- Detect the user’s intent (onboarding step, docs, status, support).
+- Keep replies to 1–3 short paragraphs max.
+- End with a helpful next action (e.g., “Vuoi iniziare dal documento X?” / “Shall we start with document X?”).
 """
 
                 try:
                     chat_completion = client.chat.completions.create(
                         model="gpt-4o",
                         timeout=15,
+                        temperature=0.7,
+                        top_p=1,
+                        frequency_penalty=0.6,
+                        presence_penalty=0.2,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": incoming_msg}
@@ -216,7 +376,7 @@ Here is all platform knowledge:
                     reply = chat_completion.choices[0].message.content.strip()
                     print("[GPT REPLY]:", reply)
                 except Exception as e:
-                    reply = "Sorry, something went wrong. Please try again later."
+                    reply = "Sorry, something went wrong. Please try again later." if lang == "en" else "Spiacente, si è verificato un errore. Riprova più tardi."
                     print("[GPT ERROR]:", e)
 
                 candidate.history.append({"from": "bot", "text": reply})
@@ -241,9 +401,6 @@ Here is all platform knowledge:
             print("❌ Error in meta_webhook main handler:", e)
 
         return JsonResponse({"status": "received"})
-
-
-
 
 
 @csrf_exempt
@@ -360,8 +517,6 @@ def resume_bot(request):
     except Candidate.DoesNotExist:
         return JsonResponse({"resumed": False})
 
-    
-
 
 @require_GET
 def get_all_chats(request):
@@ -439,3 +594,29 @@ def get_report_stats(request):
     })
 
 
+from django.core.mail import send_mail
+
+def send_escalation_email(candidate):
+    subject = f"[Escalation Alert] {candidate.name or 'Unknown'} ({candidate.phone_number})"
+    message = f"""
+⚠️ A user has been escalated!
+
+Name: {candidate.name}
+Phone: {candidate.phone_number}
+Reason: {candidate.escalation_reason or 'N/A'}
+
+Check the admin panel for full chat history.
+
+— InPlace Onboarding Bot
+"""
+    try:
+        send_mail(
+            subject,
+            message,
+            os.getenv("EMAIL_HOST_USER"),
+            [os.getenv("ADMIN_ALERT_EMAIL")],
+            fail_silently=False,
+        )
+        print("✅ Email sent to admin.")
+    except Exception as e:
+        print("❌ Failed to send email:", e)
