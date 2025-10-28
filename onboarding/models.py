@@ -8,6 +8,8 @@ class Candidate(models.Model):
     history = models.JSONField(null=True, blank=True)
     last_updated = models.DateTimeField(auto_now=True)
     escalation_reason = models.CharField(max_length=255, null=True, blank=True)
+    processed_message_ids = models.JSONField(default=list, blank=True)
+    preferred_language = models.CharField(max_length=10, default='it')
 
 
     def __str__(self):

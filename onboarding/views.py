@@ -4,6 +4,9 @@ import os
 import json
 import requests
 import pandas as pd
+import threading
+import time
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from openai import OpenAI
 from django.http import HttpResponse, JsonResponse
@@ -32,6 +35,60 @@ CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "gpt-5-mini")  # cheap classifi
 with open("onboarding/data/inplace_onboarding.txt", "r", encoding="utf-8") as f:
     onboarding_data = f.read()
 
+# ==============================
+# Rate Limiting & Logging
+# ==============================
+
+# In-memory rate limiter (use Redis in production)
+user_requests = {}
+MAX_REQUESTS_PER_MINUTE = 10
+MAX_REQUESTS_PER_HOUR = 100
+
+def check_rate_limit(phone_number: str) -> bool:
+    """Check if user has exceeded rate limits"""
+    now = time.time()
+    if phone_number not in user_requests:
+        user_requests[phone_number] = []
+    
+    requests_history = user_requests[phone_number]
+    
+    # Clean old requests
+    requests_history[:] = [req_time for req_time in requests_history if now - req_time < 3600]
+    
+    # Check per-minute limit
+    recent_minute = sum(1 for req_time in requests_history if now - req_time < 60)
+    if recent_minute >= MAX_REQUESTS_PER_MINUTE:
+        return False
+    
+    # Check per-hour limit
+    recent_hour = len(requests_history)
+    if recent_hour >= MAX_REQUESTS_PER_HOUR:
+        return False
+    
+    # Log this request
+    requests_history.append(now)
+    return True
+
+
+def log_info(message: str, phone: str = None):
+    """Structured logging"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prefix = f"🤖 [{timestamp}]"
+    if phone:
+        prefix += f" [{phone}]"
+    print(f"{prefix} {message}")
+
+
+def log_error(message: str, error: Exception = None, phone: str = None):
+    """Error logging"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prefix = f"❌ [{timestamp}]"
+    if phone:
+        prefix += f" [{phone}]"
+    print(f"{prefix} {message}")
+    if error:
+        print(f"   Error: {str(error)}")
+
 
 # ==============================
 # Utilities (Lang, HTTP, Params)
@@ -39,27 +96,56 @@ with open("onboarding/data/inplace_onboarding.txt", "r", encoding="utf-8") as f:
 
 def detect_language(text: str) -> str:
     """
-    Forgiving detector tuned for EN/IT. Returns 'it' by default.
-    We choose the language for THIS message, so the bot can switch mid-chat naturally.
+    Improved language detection for EN/IT and other languages.
+    Uses better heuristics and returns detected language or 'en' as fallback.
     """
-    t = (text or "").strip().lower()
-    if not t:
-        return "it"
-    it_markers = [
-        "ciao", "grazie", "buongiorno", "buonasera", "salve",
-        "nome", "cognome", "documento", "firma", "codice",
-        "residenza", "comune", "registrati", "verifica", "email"
-    ]
-    en_markers = ["hello", "hi", "hey", "thanks", "thank you", "good morning", "good evening", "register", "verify"]
-    if any(kw in t for kw in it_markers):
-        return "it"
-    if any(kw in t for kw in en_markers):
+    if not text:
         return "en"
-    # fallback based on characters: very rough but helps for short tokens
-    return "en" if any(c in t for c in "qwxjk") else "it"
+    
+    t = text.strip().lower()
+    
+    # Italian markers
+    it_markers = [
+        "ciao", "grazie", "buongiorno", "buonasera", "buonanotte", "salve",
+        "nome", "cognome", "documento", "firma", "codice", "come", "cosa",
+        "residenza", "comune", "registrati", "verifica", "email", "italiano",
+        "esempio", "posso", "aiuto", "piacere", "scusa", "prego", "certo"
+    ]
+    
+    # English markers
+    en_markers = [
+        "hello", "hi", "hey", "thanks", "thank", "good morning", "good evening",
+        "good night", "name", "surname", "document", "signature", "code",
+        "how", "what", "where", "register", "verify", "email", "english",
+        "example", "can", "help", "please", "sorry", "sure", "yes", "no"
+    ]
+    
+    # Calculate marker presence
+    it_score = sum(1 for marker in it_markers if marker in t)
+    en_score = sum(1 for marker in en_markers if marker in t)
+    
+    # Check for specific Italian patterns
+    it_patterns = ["è", "è", "à", "é", "ù", "ò", "perché", "che", "del", "della", "gli", "le"]
+    if any(pattern in t for pattern in it_patterns):
+        it_score += 2
+    
+    # Determine language
+    if it_score > en_score and it_score > 0:
+        return "it"
+    elif en_score > it_score and en_score > 0:
+        return "en"
+    elif it_score == en_score and it_score > 0:
+        # If tie, check for characteristic characters
+        if any(c in t for c in "àèéìòù"):
+            return "it"
+        return "en"
+    
+    # Fallback to English if no clear markers
+    return "en"
 
 
-def send_text_message(phone_number: str, body: str):
+def send_text_message_with_retry(phone_number: str, body: str, max_retries: int = 3):
+    """Send message with retry logic"""
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -71,10 +157,24 @@ def send_text_message(phone_number: str, body: str):
         "type": "text",
         "text": {"body": body}
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    print(f"📨 Text send -> {phone_number}: {r.status_code} {r.text}")
-    r.raise_for_status()
-    return r.json()
+    
+    for attempt in range(max_retries):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=30)
+            log_info(f"📨 Text sent -> {phone_number}: {r.status_code}")
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            log_error(f"Failed to send message (attempt {attempt + 1}/{max_retries})", e, phone_number)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                raise
+
+
+def send_text_message(phone_number: str, body: str):
+    """Legacy function for backward compatibility"""
+    return send_text_message_with_retry(phone_number, body)
 
 
 def gpt_params_for_model(model_name: str, messages, timeout: int = 20):
@@ -116,10 +216,17 @@ def get_state_objects(history):
 
 
 def summarize_if_needed(candidate):
-    """Occasional rolling summary to keep context coherent without long histories."""
+    """Occasional rolling summary to keep context coherent without long histories.
+    OPTIMIZED: Only run every 10th message to reduce API calls."""
     history = candidate.history or []
-    if len(history) < 60:
+    if len(history) < 100:  # Increased threshold to reduce frequency
         return
+    
+    # Only summarize every 10 messages to avoid slowdown
+    non_state_messages = [m for m in history if m.get("from") in {"user", "bot", "admin", "summary"}]
+    if len(non_state_messages) % 10 != 0:
+        return
+    
     # Find last summary index
     last_summary_idx = None
     for i, m in enumerate(history):
@@ -254,49 +361,99 @@ Behavioral rules:
     return messages
 
 
-def orchestrated_reply(candidate, incoming_msg: str):
+def get_fallback_response(lang: str, incoming_msg: str) -> str:
+    """Fallback responses when GPT fails"""
+    msg_lower = incoming_msg.lower()
+    
+    fallbacks_en = {
+        "hello": "Hello! I'm here to help you with your InPlace onboarding. What would you like to do?",
+        "hi": "Hi! How can I assist you with your registration?",
+        "thanks": "You're welcome! Anything else I can help with?",
+        "thank you": "You're welcome! Anything else I can help with?",
+        "bye": "Goodbye! Feel free to message again if you need help.",
+        "ciao": "Ciao! I'm here to help you with your InPlace onboarding. What would you like to do?",  # Sometimes Italian sneaks in
+    }
+    
+    fallbacks_it = {
+        "ciao": "Ciao! Sono qui per aiutarti con l'onboarding di InPlace. Da dove vuoi iniziare?",
+        "ciao": "Ciao! Come posso aiutarti con la tua registrazione?",
+        "grazie": "Prego! Posso aiutarti con qualcos'altro?",
+        "grazie mille": "Prego! Posso aiutarti con qualcos'altro?",
+        "arrivederci": "Arrivederci! Sentiti libero di scrivere di nuovo se hai bisogno.",
+    }
+    
+    fallbacks = fallbacks_it if lang == "it" else fallbacks_en
+    for key, response in fallbacks.items():
+        if key in msg_lower:
+            return response
+    
+    # Generic fallback
+    if lang == "it":
+        return "Capisco. Puoi spiegare meglio come posso aiutarti?"
+    else:
+        return "I understand. Could you explain how I can help you?"
+
+
+def orchestrated_reply_with_retry(candidate, incoming_msg: str, max_retries: int = 2):
     """
     One GPT call that returns a JSON with reply + state and saves state in history.
-    Language is selected from the CURRENT message so we can switch mid-chat.
+    Uses candidate's preferred_language for consistency.
+    Includes retry logic for robustness.
     """
     history = candidate.history or []
     # first user message if count of user entries == 1 after appending
     user_msgs = [m for m in history if m.get("from") == "user"]
     is_first_inbound = len(user_msgs) == 1
-    lang = detect_language(incoming_msg)
+    
+    # Use preferred language instead of detecting each time for consistency
+    lang = candidate.preferred_language or detect_language(incoming_msg)
 
     messages = build_dialogue_messages(candidate, incoming_msg, lang, is_first_inbound)
 
-    try:
-        res = client.chat.completions.create(
-            **gpt_params_for_model(MAIN_MODEL, messages, timeout=20)
-        )
-        raw = res.choices[0].message.content.strip()
-        print("🧠 Orchestrator RAW:", raw)
-
+    for attempt in range(max_retries):
         try:
-            data = json.loads(raw)
-        except Exception:
-            data = {"reply": raw, "state_update": None, "intent": "other", "next_step": ""}
+            res = client.chat.completions.create(
+                **gpt_params_for_model(MAIN_MODEL, messages, timeout=20)
+            )
+            raw = res.choices[0].message.content.strip()
+            log_info(f"🧠 Orchestrator response received (attempt {attempt + 1})", candidate.phone_number)
 
-        reply = (data.get("reply") or "").strip()
-        if not reply:
-            reply = "Ok." if lang == "en" else "Ok."
-
-        # Persist state
-        su = data.get("state_update")
-        if su:
             try:
-                candidate.history.append({"from": "state", "text": json.dumps(su, ensure_ascii=False)})
-                candidate.save()
-            except Exception as e:
-                print("⚠️ Failed to save state:", e)
+                data = json.loads(raw)
+            except Exception:
+                data = {"reply": raw, "state_update": None, "intent": "other", "next_step": ""}
 
-        return reply
+            reply = (data.get("reply") or "").strip()
+            if not reply:
+                reply = get_fallback_response(lang, incoming_msg)
 
-    except Exception as e:
-        print("[GPT ERROR]:", e)
-        return "Sorry, something went wrong. Please try again later." if lang == "en" else "Spiacente, si è verificato un errore. Riprova più tardi."
+            # Persist state
+            su = data.get("state_update")
+            if su:
+                try:
+                    candidate.history.append({"from": "state", "text": json.dumps(su, ensure_ascii=False)})
+                    candidate.save()
+                except Exception as e:
+                    log_error("Failed to save state", e, candidate.phone_number)
+
+            return reply
+
+        except Exception as e:
+            log_error(f"GPT API error (attempt {attempt + 1}/{max_retries})", e, candidate.phone_number)
+            if attempt < max_retries - 1:
+                time.sleep(1)  # Brief delay before retry
+            else:
+                # Final attempt failed, use fallback
+                log_info("Using fallback response due to API failure", candidate.phone_number)
+                return get_fallback_response(lang, incoming_msg)
+    
+    # Should never reach here
+    return get_fallback_response(lang, incoming_msg)
+
+
+def orchestrated_reply(candidate, incoming_msg: str):
+    """Wrapper that calls the retry version"""
+    return orchestrated_reply_with_retry(candidate, incoming_msg)
 
 
 # ==============================
@@ -356,54 +513,77 @@ def send_onboarding_template(phone_number, name):
 # Webhook
 # ==============================
 
-@csrf_exempt
-def meta_webhook(request):
-    if request.method == 'GET':
-        mode = request.GET.get("hub.mode")
-        token = request.GET.get("hub.verify_token")
-        challenge = request.GET.get("hub.challenge")
-        if mode == "subscribe" and token == VERIFY_TOKEN:
-            return HttpResponse(challenge)
-        return HttpResponse("Verification failed", status=403)
+def process_webhook_message(data: dict):
+    """
+    Background processing function for webhook messages.
+    This runs in a separate thread to avoid blocking the response.
+    """
+    try:
+        value = data['entry'][0]['changes'][0]['value']
+        if 'messages' not in value:
+            return
+            
+        incoming_msg = value['messages'][0]['text']['body']
+        sender_id = value['messages'][0]['from']
+        message_id = value['messages'][0].get('id')
+        
+        log_info(f"Processing message: {incoming_msg[:50]}", sender_id)
 
-    if request.method == 'POST':
-        try:
-            data = json.loads(request.body.decode("utf-8"))
-        except Exception as e:
-            print("Error parsing JSON:", e)
-            return HttpResponse(status=400)
+        candidate, _ = Candidate.objects.get_or_create(
+            phone_number=sender_id,
+            defaults={'name': 'Unknown', 'surname': 'Unknown', 'processed_message_ids': []}
+        )
 
-        print("Incoming from Meta:", json.dumps(data, indent=2))
+        # Initialize fields if None
+        if candidate.processed_message_ids is None:
+            candidate.processed_message_ids = []
+        if candidate.history is None:
+            candidate.history = []
+        
+        # MESSAGE DEDUPLICATION - prevent loop
+        if message_id and message_id in candidate.processed_message_ids:
+            log_info(f"Duplicate message {message_id} - skipping", sender_id)
+            return
+        
+        # Check rate limit
+        if not check_rate_limit(sender_id):
+            log_info("Rate limit exceeded", sender_id)
+            send_text_message_with_retry(sender_id, 
+                "Calma! Stai inviando troppi messaggi. Attendi un momento." if candidate.preferred_language == "it"
+                else "Please slow down! You're sending too many messages. Wait a moment.")
+            return
+        
+        # Mark message as processed
+        if message_id:
+            candidate.processed_message_ids.append(message_id)
+            # Keep only last 100 message IDs
+            if len(candidate.processed_message_ids) > 100:
+                candidate.processed_message_ids = candidate.processed_message_ids[-100:]
+        
+        candidate.history.append({"from": "user", "text": incoming_msg})
+        
+        # Update preferred language based on this message
+        detected_lang = detect_language(incoming_msg)
+        candidate.preferred_language = detected_lang
+        
+        candidate.save()
 
-        try:
-            value = data['entry'][0]['changes'][0]['value']
-            if 'messages' in value:
-                incoming_msg = value['messages'][0]['text']['body']
-                sender_id = value['messages'][0]['from']
-                print(f"📨 Message from {sender_id}: {incoming_msg}")
+        # ===== OPTIMIZED Escalation - only check every 3rd message =====
+        should_escalate = False
+        escalation_reason = ""
 
-                candidate, _ = Candidate.objects.get_or_create(
-                    phone_number=sender_id,
-                    defaults={'name': 'Unknown', 'surname': 'Unknown'}
+        # Only run escalation check every 3rd message to reduce API calls
+        user_messages = [m for m in candidate.history if m.get("from") == "user"]
+        should_check_escalation = len(user_messages) % 3 == 0 or len(user_messages) == 1
+
+        if candidate.status != "escalated" and should_check_escalation:
+            try:
+                chat_history = candidate.history[-5:] if candidate.history else []
+                chat_history_text = "\n".join(
+                    [f"{m['from']}: {m['text']}" for m in chat_history] + [f"user: {incoming_msg}"]
                 )
 
-                if candidate.history is None:
-                    candidate.history = []
-                candidate.history.append({"from": "user", "text": incoming_msg})
-                candidate.save()
-
-                # ===== Escalation (unchanged) =====
-                should_escalate = False
-                escalation_reason = ""
-
-                if candidate.status != "escalated":
-                    try:
-                        chat_history = candidate.history[-5:] if candidate.history else []
-                        chat_history_text = "\n".join(
-                            [f"{m['from']}: {m['text']}" for m in chat_history] + [f"user: {incoming_msg}"]
-                        )
-
-                        classification_prompt = f"""
+                classification_prompt = f"""
 You are an escalation analyzer for a support chatbot.
 
 Return JSON with:
@@ -418,67 +598,105 @@ Escalate only if scores are high; do not escalate for polite help/thanks.
 {chat_history_text}
 --- CHAT END ---
 """
-                        result = client.chat.completions.create(
-                            **gpt_params_for_model(CLASSIFIER_MODEL, [
-                                {"role": "system", "content": classification_prompt}
-                            ], timeout=10)
-                        )
+                result = client.chat.completions.create(
+                    **gpt_params_for_model(CLASSIFIER_MODEL, [
+                        {"role": "system", "content": classification_prompt}
+                    ], timeout=10)
+                )
 
-                        response_text = result.choices[0].message.content
-                        print("🧠 Raw GPT Escalation Scores:", response_text)
+                response_text = result.choices[0].message.content
 
-                        scores = json.loads(response_text)
-                        f = scores.get("frustration_score", 0)
-                        h = scores.get("human_request_score", 0)
-                        c = scores.get("confusion_score", 0)
-                        r = scores.get("repeat_count", 0)
+                scores = json.loads(response_text)
+                f = scores.get("frustration_score", 0)
+                h = scores.get("human_request_score", 0)
+                c = scores.get("confusion_score", 0)
+                r = scores.get("repeat_count", 0)
 
-                        if f >= 7 or h >= 8 or (c >= 8 and r >= 3):
-                            should_escalate = True
-                            escalation_reason = f"Escalated (F:{f}, H:{h}, C:{c}, R:{r})"
+                if f >= 7 or h >= 8 or (c >= 8 and r >= 3):
+                    should_escalate = True
+                    escalation_reason = f"Escalated (F:{f}, H:{h}, C:{c}, R:{r})"
+                    log_info(f"Escalation triggered: {escalation_reason}", sender_id)
 
-                    except Exception as e:
-                        print("⚠️ GPT Escalation Error:", e)
+            except Exception as e:
+                log_error("Escalation check failed", e, sender_id)
 
-                if should_escalate:
-                    candidate.status = "escalated"
-                    candidate.escalation_reason = escalation_reason
-                    candidate.save()
-                    send_escalation_email(candidate)
-                    print(f"⛔ Escalated: {escalation_reason}")
-                    return JsonResponse({"status": "paused"})
+        if should_escalate:
+            candidate.status = "escalated"
+            candidate.escalation_reason = escalation_reason
+            candidate.save()
+            send_escalation_email(candidate)
+            log_info(f"User escalated: {escalation_reason}", sender_id)
+            return
 
-                if candidate.status == 'escalated':
-                    print("⛔ Bot paused for this user (already escalated).")
-                    return JsonResponse({"status": "paused"})
+        if candidate.status == 'escalated':
+            log_info("Bot paused for this user (already escalated)", sender_id)
+            return
 
-                # ===== Orchestrated normal reply =====
-                reply = orchestrated_reply(candidate, incoming_msg)
+        # ===== Orchestrated normal reply =====
+        reply = orchestrated_reply(candidate, incoming_msg)
 
-                # Save + send
-                candidate.history.append({"from": "bot", "text": reply})
-                candidate.status = "replied"
-                candidate.save()
+        # Save + send
+        candidate.history.append({"from": "bot", "text": reply})
+        candidate.status = "replied"
+        candidate.save()
 
-                headers = {
-                    "Authorization": f"Bearer {ACCESS_TOKEN}",
-                    "Content-Type": "application/json"
-                }
-                url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
-                payload = {
-                    "messaging_product": "whatsapp",
-                    "to": sender_id,
-                    "type": "text",
-                    "text": {"body": reply}
-                }
-                r = requests.post(url, json=payload, headers=headers)
-                print("✅ Replied:", r.status_code, r.text)
-
-                # Opportunistic compression
-                summarize_if_needed(candidate)
-
+        headers = {
+            "Authorization": f"Bearer {ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": sender_id,
+            "type": "text",
+            "text": {"body": reply}
+        }
+        
+        try:
+            send_text_message_with_retry(sender_id, reply)
+            log_info(f"✅ Reply sent", sender_id)
         except Exception as e:
-            print("❌ Error in meta_webhook main handler:", e)
+            log_error("Failed to send reply", e, sender_id)
+
+        # Opportunistic compression
+        try:
+            summarize_if_needed(candidate)
+        except Exception as e:
+            log_error("Summary failed", e, sender_id)
+
+    except Exception as e:
+        log_error("Error in background processing", e)
+
+
+@csrf_exempt
+def meta_webhook(request):
+    """Webhook handler - returns 200 OK immediately and processes in background"""
+    if request.method == 'GET':
+        mode = request.GET.get("hub.mode")
+        token = request.GET.get("hub.verify_token")
+        challenge = request.GET.get("hub.challenge")
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            return HttpResponse(challenge)
+        return HttpResponse("Verification failed", status=403)
+
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body.decode("utf-8"))
+        except Exception as e:
+            log_error("Error parsing JSON", e)
+            return HttpResponse(status=400)
+
+        log_info("Incoming webhook from Meta")
+        
+        # RETURN 200 OK IMMEDIATELY - process in background
+        try:
+            # Start background thread to process message
+            thread = threading.Thread(target=process_webhook_message, args=(data,))
+            thread.daemon = True
+            thread.start()
+            log_info("Background processing started")
+        except Exception as e:
+            log_error("Failed to start background thread", e)
 
         return JsonResponse({"status": "received"})
 
