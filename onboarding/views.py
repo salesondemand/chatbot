@@ -27,8 +27,8 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 print("🔑 OpenAI key loaded:", bool(client.api_key))
 
 # Swap models here if needed
-MAIN_MODEL = os.getenv("MAIN_MODEL", "gpt-5")       # "gpt-5" or "gpt-4o"
-CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "gpt-5-mini")  # cheap classifier; or "gpt-4o-mini"
+MAIN_MODEL = os.getenv("MAIN_MODEL", "gpt-4o")       # "gpt-4o" is faster than gpt-5
+CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "gpt-4o-mini")  # cheap classifier
 
 with open("onboarding/data/inplace_onboarding.txt", "r", encoding="utf-8") as f:
     onboarding_data = f.read()
@@ -99,21 +99,18 @@ def send_text_message(phone_number: str, body: str):
         "type": "text",
         "text": {"body": body}
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    r = requests.post(url, headers=headers, json=payload, timeout=10)
     print(f"📨 Text send -> {phone_number}: {r.status_code} {r.text}")
     r.raise_for_status()
     return r.json()
 
 
-def gpt_params_for_model(model_name: str, messages, timeout: int = 20):
+def gpt_params_for_model(model_name: str, messages, timeout: int = 8):
     """
-    GPT-5 via chat.completions currently only supports default sampling params.
-    GPT-4o supports temperature/top_p/penalties. This helper picks the right kwargs.
+    GPT-4o for speed, supports temperature/top_p/penalties.
     """
     base = dict(model=model_name, timeout=timeout, messages=messages)
-    if "gpt-5" in model_name:
-        return base
-    # For 4o and others, enable anti-repetition + natural variety
+    # Enable anti-repetition + natural variety
     base.update(dict(temperature=0.7, top_p=1, frequency_penalty=0.7, presence_penalty=0.3))
     return base
 
@@ -195,7 +192,7 @@ def build_dialogue_messages(candidate, user_msg: str, lang: str, is_first_inboun
     """
     history = candidate.history or []
     last_state, last_summary = get_state_objects(history)
-    recent = [m for m in history if m.get("from") in {"user", "bot", "admin"}][-12:]
+    recent = [m for m in history if m.get("from") in {"user", "bot", "admin"}][-6:]
 
     base_style_it = """
 Sei un assistente per l’onboarding InPlace.it, bilingue (Italiano/English).
@@ -297,7 +294,7 @@ def orchestrated_reply(candidate, incoming_msg: str):
 
     try:
         res = client.chat.completions.create(
-            **gpt_params_for_model(MAIN_MODEL, messages, timeout=20)
+            **gpt_params_for_model(MAIN_MODEL, messages, timeout=8)
         )
         raw = res.choices[0].message.content.strip()
         print("🧠 Orchestrator RAW:", raw)
@@ -381,6 +378,110 @@ def send_onboarding_template(phone_number, name):
 
 
 # ==============================
+# Escalation Helpers
+# ==============================
+
+def check_immediate_escalation(message: str) -> bool:
+    """
+    Fast keyword-based escalation check for explicit human requests.
+    Uses phrase matching to avoid false positives.
+    """
+    msg_lower = message.lower()
+    
+    # Italian keywords - phrases only, not single words
+    it_keywords = [
+        "parlare con un operatore",
+        "parlare con una persona",
+        "contattare un umano",
+        "assistenza umana",
+        "voglio un operatore",
+        "voglio parlare con",
+        "posso parlare con una persona",
+        "ho bisogno di parlare con un operatore"
+    ]
+    
+    # English keywords - phrases only
+    en_keywords = [
+        "speak to a human",
+        "talk to an operator",
+        "contact a person",
+        "human assistance",
+        "i need a person",
+        "real person",
+        "talk to a person",
+        "speak with an agent"
+    ]
+    
+    # Check if message contains any escalation phrase
+    for phrase in it_keywords + en_keywords:
+        if phrase in msg_lower:
+            return True
+    
+    return False
+
+
+def run_background_escalation_check(candidate, incoming_msg: str):
+    """
+    Background escalation analysis using GPT.
+    Runs after reply is sent to detect frustration without blocking.
+    """
+    try:
+        if candidate.status == "escalated":
+            return
+        
+        # Only check every 3rd message to reduce API calls
+        user_messages = [m for m in candidate.history if m.get("from") == "user"]
+        should_check_escalation = len(user_messages) % 3 == 0 or len(user_messages) == 1
+        
+        if not should_check_escalation:
+            return
+        
+        chat_history = candidate.history[-5:] if candidate.history else []
+        chat_history_text = "\n".join(
+            [f"{m['from']}: {m['text']}" for m in chat_history] + [f"user: {incoming_msg}"]
+        )
+
+        classification_prompt = f"""
+You are an escalation analyzer for a support chatbot.
+
+Return JSON with:
+- frustration_score (0-10)
+- human_request_score (0-10)
+- confusion_score (0-10)
+- repeat_count (0-10)
+
+Escalate only if scores are high; do not escalate for polite help/thanks.
+
+--- CHAT START ---
+{chat_history_text}
+--- CHAT END ---
+"""
+        result = client.chat.completions.create(
+            model=CLASSIFIER_MODEL,
+            messages=[{"role": "system", "content": classification_prompt}],
+            timeout=5
+        )
+
+        response_text = result.choices[0].message.content
+        scores = json.loads(response_text)
+        
+        f = scores.get("frustration_score", 0)
+        h = scores.get("human_request_score", 0)
+        c = scores.get("confusion_score", 0)
+        r = scores.get("repeat_count", 0)
+
+        if f >= 7 or h >= 8 or (c >= 8 and r >= 3):
+            escalation_reason = f"Escalated (F:{f}, H:{h}, C:{c}, R:{r})"
+            candidate.status = "escalated"
+            candidate.escalation_reason = escalation_reason
+            candidate.save()
+            send_escalation_email(candidate)
+            print(f"⛔ Background escalation: {escalation_reason}")
+    except Exception as e:
+        print(f"⚠️ Background escalation check failed: {e}")
+
+
+# ==============================
 # Webhook
 # ==============================
 
@@ -426,65 +527,23 @@ def process_webhook_message(data: dict):
         candidate.history.append({"from": "user", "text": incoming_msg})
         candidate.save()
 
-        # ===== OPTIMIZED Escalation - only check every 3rd message =====
-        should_escalate = False
-        escalation_reason = ""
-
-        # Only run escalation check every 3rd message to reduce API calls
-        user_messages = [m for m in candidate.history if m.get("from") == "user"]
-        should_check_escalation = len(user_messages) % 3 == 0 or len(user_messages) == 1
-
-        if candidate.status != "escalated" and should_check_escalation:
-            try:
-                chat_history = candidate.history[-5:] if candidate.history else []
-                chat_history_text = "\n".join(
-                    [f"{m['from']}: {m['text']}" for m in chat_history] + [f"user: {incoming_msg}"]
-                )
-
-                classification_prompt = f"""
-You are an escalation analyzer for a support chatbot.
-
-Return JSON with:
-- frustration_score (0-10)
-- human_request_score (0-10)
-- confusion_score (0-10)
-- repeat_count (0-10)
-
-Escalate only if scores are high; do not escalate for polite help/thanks.
-
---- CHAT START ---
-{chat_history_text}
---- CHAT END ---
-"""
-                result = client.chat.completions.create(
-                    **gpt_params_for_model(CLASSIFIER_MODEL, [
-                        {"role": "system", "content": classification_prompt}
-                    ], timeout=10)
-                )
-
-                response_text = result.choices[0].message.content
-
-                scores = json.loads(response_text)
-                f = scores.get("frustration_score", 0)
-                h = scores.get("human_request_score", 0)
-                c = scores.get("confusion_score", 0)
-                r = scores.get("repeat_count", 0)
-
-                if f >= 7 or h >= 8 or (c >= 8 and r >= 3):
-                    should_escalate = True
-                    escalation_reason = f"Escalated (F:{f}, H:{h}, C:{c}, R:{r})"
-
-            except Exception as e:
-                print("⚠️ GPT Escalation Error:", e)
-
-        if should_escalate:
+        # ===== TWO-TIER ESCALATION =====
+        
+        # Tier 1: Fast keyword check BEFORE reply (explicit human requests)
+        if check_immediate_escalation(incoming_msg):
             candidate.status = "escalated"
-            candidate.escalation_reason = escalation_reason
+            candidate.escalation_reason = "Immediate escalation (explicit request)"
             candidate.save()
             send_escalation_email(candidate)
-            print(f"⛔ Escalated: {escalation_reason}")
+            
+            # Send handoff message
+            lang = detect_language(incoming_msg)
+            handoff_msg = "Ti metto in contatto con un operatore. A breve riceverai assistenza." if lang == "it" else "I'll connect you with an operator. You'll receive assistance shortly."
+            send_text_message(sender_id, handoff_msg)
+            print(f"⛔ Immediate escalation triggered")
             return
-
+        
+        # Skip if already escalated
         if candidate.status == 'escalated':
             print("⛔ Bot paused for this user (already escalated).")
             return
@@ -497,23 +556,25 @@ Escalate only if scores are high; do not escalate for polite help/thanks.
         candidate.status = "replied"
         candidate.save()
 
-        headers = {
-            "Authorization": f"Bearer {ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": sender_id,
-            "type": "text",
-            "text": {"body": reply}
-        }
-        
         send_text_message(sender_id, reply)
         print("✅ Replied successfully")
 
-        # Opportunistic compression
-        summarize_if_needed(candidate)
+        # ===== Tier 2: Background escalation analysis (after reply sent) =====
+        # Spawn background thread for GPT-based frustration detection
+        thread = threading.Thread(target=run_background_escalation_check, args=(candidate, incoming_msg))
+        thread.daemon = True
+        thread.start()
+        
+        # Run summarization in background too
+        def background_summarize():
+            try:
+                summarize_if_needed(candidate)
+            except Exception as e:
+                print(f"⚠️ Background summary failed: {e}")
+        
+        summary_thread = threading.Thread(target=background_summarize)
+        summary_thread.daemon = True
+        summary_thread.start()
 
     except Exception as e:
         print("❌ Error in background processing:", e)
