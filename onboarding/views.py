@@ -2,6 +2,7 @@
 
 import os
 import json
+import re
 import requests
 import pandas as pd
 import threading
@@ -299,12 +300,96 @@ def orchestrated_reply(candidate, incoming_msg: str):
         raw = res.choices[0].message.content.strip()
         print("🧠 Orchestrator RAW:", raw)
 
-        try:
-            data = json.loads(raw)
-        except Exception:
-            data = {"reply": raw, "state_update": None, "intent": "other", "next_step": ""}
+        # Clean markdown code blocks if present (GPT sometimes wraps JSON in ```json ... ```)
+        cleaned = raw
+        # More robust markdown code fence removal
+        if "```" in cleaned:
+            # Remove opening code fence (```json, ```, etc.) - handle with or without language identifier
+            cleaned = re.sub(r'^```\w*\s*\n?', '', cleaned, flags=re.MULTILINE)
+            # Remove closing code fence
+            cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE)
+            cleaned = cleaned.strip()
 
-        reply = (data.get("reply") or "").strip()
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            print(f"⚠️ JSON parse error: {e}, using fallback")
+            # If parsing fails, treat the entire response as the reply (don't send raw JSON)
+            # Extract any text that looks like a natural language response
+            if cleaned.startswith("{") and cleaned.endswith("}"):
+                # It's JSON but malformed - try to extract reply manually
+                try:
+                    # Try to extract reply field from JSON string manually
+                    # Look for "reply": "..." pattern, handling escaped quotes and multiline strings
+                    # This regex handles: "reply": "text" or "reply":"text" with escaped quotes
+                    # Also handles multiline strings with proper escaping
+                    match = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned, re.DOTALL)
+                    if match:
+                        reply_text = match.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
+                    else:
+                        # Last resort: return a generic message instead of raw JSON
+                        reply_text = "Ok." if lang == "en" else "Ok."
+                    data = {"reply": reply_text, "state_update": None, "intent": "other", "next_step": ""}
+                except Exception:
+                    data = {"reply": "Ok." if lang == "en" else "Ok.", "state_update": None, "intent": "other", "next_step": ""}
+            else:
+                # Not JSON, use as-is
+                data = {"reply": cleaned, "state_update": None, "intent": "other", "next_step": ""}
+
+        # Extract reply field - ensure it's always a string, never raw JSON
+        reply = data.get("reply")
+        # Handle None, empty string, or other falsy values
+        if reply is None or reply == "":
+            reply = ""
+        elif isinstance(reply, dict):
+            # If reply is accidentally a dict/object, don't send it - use fallback
+            print("⚠️ Reply field is a dict, using fallback")
+            reply = ""
+        elif isinstance(reply, list):
+            # If reply is a list, don't send it - use fallback
+            print("⚠️ Reply field is a list, using fallback")
+            reply = ""
+        elif not isinstance(reply, str):
+            # Convert other types to string, but check if it looks like JSON first
+            reply_str = str(reply)
+            if reply_str.startswith("{") and reply_str.endswith("}"):
+                print("⚠️ Reply field converted to string but looks like JSON, using fallback")
+                reply = ""
+            else:
+                reply = reply_str
+        
+        reply = reply.strip() if reply else ""
+        
+        # Final safety check: if reply looks like JSON (starts with { and ends with }), don't send it
+        # Also check for orchestrator JSON structure markers to catch the full response being sent
+        is_orchestrator_json = (
+            reply.startswith("{") and reply.endswith("}") and
+            ("\"intent\"" in reply or "\"next_step\"" in reply or "\"state_update\"" in reply)
+        )
+        
+        if reply.startswith("{") and reply.endswith("}"):
+            try:
+                # Try to parse it and extract meaningful text
+                parsed_json = json.loads(reply)
+                # If it's the full orchestrator response structure, extract the reply field again
+                if "reply" in parsed_json and isinstance(parsed_json["reply"], str):
+                    extracted_reply = parsed_json["reply"].strip()
+                    # Make sure the extracted reply isn't also JSON
+                    if extracted_reply and not (extracted_reply.startswith("{") and extracted_reply.endswith("}")):
+                        reply = extracted_reply
+                    else:
+                        # Extracted reply is also JSON - use fallback
+                        print("⚠️ Extracted reply is also JSON, using fallback")
+                        reply = "Ok." if lang == "en" else "Ok."
+                else:
+                    # If no valid reply field, use a generic message
+                    print("⚠️ No valid reply field in JSON structure, using fallback")
+                    reply = "Ok." if lang == "en" else "Ok."
+            except Exception:
+                # If it's not valid JSON or can't extract, use fallback
+                print("⚠️ Could not parse JSON in final safety check, using fallback")
+                reply = "Ok." if lang == "en" else "Ok."
+        
         if not reply:
             reply = "Ok." if lang == "en" else "Ok."
 
