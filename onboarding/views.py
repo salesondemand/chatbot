@@ -413,7 +413,7 @@ def orchestrated_reply(candidate, incoming_msg: str):
 # Meta Template (unchanged)
 # ==============================
 
-def send_onboarding_template(phone_number, name):
+def send_onboarding_template(phone_number, first_name: str, company: str, job_position: str):
     print(f"🔔 Sending message to: {phone_number}")
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
 
@@ -422,7 +422,7 @@ def send_onboarding_template(phone_number, name):
         "to": phone_number,
         "type": "template",
         "template": {
-            "name": "onboarding_named",
+            "name": "inplace_onboarding_v3",
             "language": {"code": "it"},
             "components": [
                 {
@@ -442,8 +442,15 @@ def send_onboarding_template(phone_number, name):
                     "parameters": [
                         {
                             "type": "text",
-                            "parameter_name": "first_name",
-                            "text": name
+                            "text": first_name
+                        },
+                        {
+                            "type": "text",
+                            "text": company
+                        },
+                        {
+                            "type": "text",
+                            "text": job_position
                         }
                     ]
                 }
@@ -727,11 +734,28 @@ def upload_excel(request):
                 )
 
                 try:
-                    name = str(row.get('name', '')).strip()
-                    if not name:
-                        name = "Amico"
-                    print(f"📤 Sending to {phone} with name: {name}")
-                    send_onboarding_template(phone, name)
+                    first_name = str(row.get('name', '')).strip()
+                    if not first_name:
+                        first_name = "Amico"
+
+                    company = str(
+                        row.get('company_name',
+                                row.get('company',
+                                        row.get('nome_azienda', 'InPlace.it')))
+                    ).strip()
+                    if not company or company.lower() == 'nan':
+                        company = "InPlace.it"
+
+                    job_position = str(
+                        row.get('job_position',
+                                row.get('job_title',
+                                        row.get('nome_posizione_lavorativa', 'la posizione proposta')))
+                    ).strip()
+                    if not job_position or job_position.lower() == 'nan':
+                        job_position = "la posizione proposta"
+
+                    print(f"📤 Sending to {phone} with name: {first_name}, company: {company}, position: {job_position}")
+                    send_onboarding_template(phone, first_name, company, job_position)
                     added += 1
                 except Exception as e:
                     print(f"❌ Failed to send to {phone}: {e}")
