@@ -1,6 +1,7 @@
 from django.test import TestCase, Client
 from django.core.files.uploadedfile import SimpleUploadedFile
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import json
 import pandas as pd
 
 from onboarding import views
@@ -34,6 +35,45 @@ class SendOnboardingTemplateTests(TestCase):
 
         header = payload["template"]["components"][0]["parameters"][0]
         self.assertEqual(header["document"]["filename"], "Informativa_InPlace.pdf")
+
+    @patch("onboarding.views.requests.post")
+    def test_send_onboarding_template_retries_with_expected_param_count(self, mock_post):
+        error_json = {
+            "error": {
+                "error_data": {
+                    "details": "body: number of localizable_params (3) does not match the expected number of params (1)"
+                }
+            }
+        }
+
+        first_response = Mock()
+        first_response.status_code = 400
+        first_response.text = json.dumps(error_json)
+        first_response.json.return_value = error_json
+
+        second_response = Mock()
+        second_response.status_code = 200
+        second_response.text = "ok"
+        second_response.json.return_value = {"success": True}
+
+        mock_post.side_effect = [first_response, second_response]
+
+        phone = "393331234567"
+        first_name = "Mario"
+        company = "ACME S.p.A."
+        position = "Operaio Specializzato"
+
+        views.send_onboarding_template(phone, first_name, company, position)
+
+        self.assertEqual(mock_post.call_count, 2)
+
+        _, first_kwargs = mock_post.call_args_list[0]
+        first_params = first_kwargs["json"]["template"]["components"][1]["parameters"]
+        self.assertEqual([p["text"] for p in first_params], [first_name, company, position])
+
+        _, second_kwargs = mock_post.call_args_list[1]
+        second_params = second_kwargs["json"]["template"]["components"][1]["parameters"]
+        self.assertEqual([p["text"] for p in second_params], [first_name])
 
 
 class UploadExcelTemplateTests(TestCase):

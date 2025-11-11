@@ -417,54 +417,83 @@ def send_onboarding_template(phone_number, first_name: str, company: str, job_po
     print(f"🔔 Sending message to: {phone_number}")
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
 
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": phone_number,
-        "type": "template",
-        "template": {
-            "name": "inplace_onboarding_v3",
-            "language": {"code": "it"},
-            "components": [
-                {
-                    "type": "header",
-                    "parameters": [
-                        {
-                            "type": "document",
-                            "document": {
-                                "link": "https://instant-avatar.com/document/Privacy%20whatsapp.pdf",
-                                "filename": "Informativa_InPlace.pdf"
+    def build_payload(param_count: int):
+        body_values = [
+            {"type": "text", "text": first_name},
+            {"type": "text", "text": company},
+            {"type": "text", "text": job_position},
+        ][:max(0, param_count)]
+
+        return {
+            "messaging_product": "whatsapp",
+            "to": phone_number,
+            "type": "template",
+            "template": {
+                "name": "inplace_onboarding_v3",
+                "language": {"code": "it"},
+                "components": [
+                    {
+                        "type": "header",
+                        "parameters": [
+                            {
+                                "type": "document",
+                                "document": {
+                                    "link": "https://instant-avatar.com/document/Privacy%20whatsapp.pdf",
+                                    "filename": "Informativa_InPlace.pdf",
+                                },
                             }
-                        }
-                    ]
-                },
-                {
-                    "type": "body",
-                    "parameters": [
-                        {
-                            "type": "text",
-                            "text": first_name
-                        },
-                        {
-                            "type": "text",
-                            "text": company
-                        },
-                        {
-                            "type": "text",
-                            "text": job_position
-                        }
-                    ]
-                }
-            ]
+                        ],
+                    },
+                    {
+                        "type": "body",
+                        "parameters": body_values,
+                    },
+                ],
+            },
         }
-    }
 
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
 
+    payload = build_payload(3)
     response = requests.post(url, headers=headers, json=payload)
     print(f"📨 Meta response: {response.status_code} {response.text}")
+
+    if response.status_code == 400:
+        fallback_count = None
+        try:
+            error_json = response.json()
+            details = (
+                error_json.get("error", {})
+                .get("error_data", {})
+                .get("details", "")
+            )
+            match = re.search(
+                r"localizable_params\s*\((\d+)\)\s*does not match the expected number of params\s*\((\d+)\)",
+                details,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                received, expected = match.groups()
+                received_count = int(received)
+                expected_count = int(expected)
+                if expected_count >= 0 and expected_count != received_count:
+                    fallback_count = expected_count
+                    print(
+                        f"⚠️ Template expects {expected_count} parameter(s); retrying with trimmed payload."
+                    )
+            else:
+                print("⚠️ Unable to parse expected parameter count from Meta error details.")
+        except (ValueError, json.JSONDecodeError) as parse_error:
+            print(f"⚠️ Failed to parse Meta error response: {parse_error}")
+
+        if fallback_count is not None:
+            fallback_payload = build_payload(fallback_count)
+            response = requests.post(url, headers=headers, json=fallback_payload)
+            print(f"📨 Meta response (retry): {response.status_code} {response.text}")
+
     response.raise_for_status()
     return response.json()
 
