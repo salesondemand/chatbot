@@ -29,9 +29,15 @@ class SendOnboardingTemplateTests(TestCase):
         self.assertEqual(payload["template"]["name"], "inplace_onboarding_v3")
 
         body_params = payload["template"]["components"][1]["parameters"]
-        expected_values = [first_name, company, position]
-        actual_values = [param["text"] for param in body_params]
-        self.assertEqual(actual_values, expected_values)
+        expected_values = [
+            {"text": first_name, "parameter_name": "first_name"},
+            {"text": company, "parameter_name": "company"},
+            {"text": position, "parameter_name": "job_position"},
+        ]
+        for idx, expected in enumerate(expected_values):
+            actual = body_params[idx]
+            self.assertEqual(actual["text"], expected["text"])
+            self.assertEqual(actual["parameter_name"], expected["parameter_name"])
 
         header = payload["template"]["components"][0]["parameters"][0]
         self.assertEqual(header["document"]["filename"], "Informativa_InPlace.pdf")
@@ -70,10 +76,12 @@ class SendOnboardingTemplateTests(TestCase):
         _, first_kwargs = mock_post.call_args_list[0]
         first_params = first_kwargs["json"]["template"]["components"][1]["parameters"]
         self.assertEqual([p["text"] for p in first_params], [first_name, company, position])
+        self.assertEqual([p["parameter_name"] for p in first_params], ["first_name", "company", "job_position"])
 
         _, second_kwargs = mock_post.call_args_list[1]
         second_params = second_kwargs["json"]["template"]["components"][1]["parameters"]
         self.assertEqual([p["text"] for p in second_params], [first_name])
+        self.assertEqual([p["parameter_name"] for p in second_params], ["first_name"])
 
 
 class UploadExcelTemplateTests(TestCase):

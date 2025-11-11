@@ -25,7 +25,7 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-print("🔑 OpenAI key loaded:", bool(client.api_key))
+print("[OPENAI] Key loaded:", bool(client.api_key))
 
 # Swap models here if needed
 MAIN_MODEL = os.getenv("MAIN_MODEL", "gpt-4o")       # "gpt-4o" is faster than gpt-5
@@ -101,7 +101,7 @@ def send_text_message(phone_number: str, body: str):
         "text": {"body": body}
     }
     r = requests.post(url, headers=headers, json=payload, timeout=10)
-    print(f"📨 Text send -> {phone_number}: {r.status_code} {r.text}")
+    print(f"[SEND] Text -> {phone_number}: {r.status_code} {r.text}")
     r.raise_for_status()
     return r.json()
 
@@ -175,7 +175,7 @@ Summarize this conversation window into 4–7 bullet points (<=120 words), prese
         candidate.history.append({"from": "summary", "text": summary})
         candidate.save()
     except Exception as e:
-        print("⚠️ Summary failed:", e)
+        print("[WARN] Summary failed:", e)
 
 
 # ==============================
@@ -298,7 +298,7 @@ def orchestrated_reply(candidate, incoming_msg: str):
             **gpt_params_for_model(MAIN_MODEL, messages, timeout=8)
         )
         raw = res.choices[0].message.content.strip()
-        print("🧠 Orchestrator RAW:", raw)
+        print("[DEBUG] Orchestrator raw response:", raw)
 
         # Clean markdown code blocks if present (GPT sometimes wraps JSON in ```json ... ```)
         cleaned = raw
@@ -313,7 +313,7 @@ def orchestrated_reply(candidate, incoming_msg: str):
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as e:
-            print(f"⚠️ JSON parse error: {e}, using fallback")
+            print(f"[WARN] JSON parse error: {e}, using fallback")
             # If parsing fails, treat the entire response as the reply (don't send raw JSON)
             # Extract any text that looks like a natural language response
             if cleaned.startswith("{") and cleaned.endswith("}"):
@@ -343,17 +343,17 @@ def orchestrated_reply(candidate, incoming_msg: str):
             reply = ""
         elif isinstance(reply, dict):
             # If reply is accidentally a dict/object, don't send it - use fallback
-            print("⚠️ Reply field is a dict, using fallback")
+            print("[WARN] Reply field is a dict, using fallback")
             reply = ""
         elif isinstance(reply, list):
             # If reply is a list, don't send it - use fallback
-            print("⚠️ Reply field is a list, using fallback")
+            print("[WARN] Reply field is a list, using fallback")
             reply = ""
         elif not isinstance(reply, str):
             # Convert other types to string, but check if it looks like JSON first
             reply_str = str(reply)
             if reply_str.startswith("{") and reply_str.endswith("}"):
-                print("⚠️ Reply field converted to string but looks like JSON, using fallback")
+                print("[WARN] Reply field converted to string but looks like JSON, using fallback")
                 reply = ""
             else:
                 reply = reply_str
@@ -379,15 +379,15 @@ def orchestrated_reply(candidate, incoming_msg: str):
                         reply = extracted_reply
                     else:
                         # Extracted reply is also JSON - use fallback
-                        print("⚠️ Extracted reply is also JSON, using fallback")
+                        print("[WARN] Extracted reply is also JSON, using fallback")
                         reply = "Ok." if lang == "en" else "Ok."
                 else:
                     # If no valid reply field, use a generic message
-                    print("⚠️ No valid reply field in JSON structure, using fallback")
+                    print("[WARN] No valid reply field in JSON structure, using fallback")
                     reply = "Ok." if lang == "en" else "Ok."
             except Exception:
                 # If it's not valid JSON or can't extract, use fallback
-                print("⚠️ Could not parse JSON in final safety check, using fallback")
+                print("[WARN] Could not parse JSON in final safety check, using fallback")
                 reply = "Ok." if lang == "en" else "Ok."
         
         if not reply:
@@ -400,7 +400,7 @@ def orchestrated_reply(candidate, incoming_msg: str):
                 candidate.history.append({"from": "state", "text": json.dumps(su, ensure_ascii=False)})
                 candidate.save()
             except Exception as e:
-                print("⚠️ Failed to save state:", e)
+                print("[WARN] Failed to save state:", e)
 
         return reply
 
@@ -414,15 +414,29 @@ def orchestrated_reply(candidate, incoming_msg: str):
 # ==============================
 
 def send_onboarding_template(phone_number, first_name: str, company: str, job_position: str):
-    print(f"🔔 Sending message to: {phone_number}")
+    print(f"[WHATSAPP] Sending message to: {phone_number}")
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
 
-    def build_payload(param_count: int):
-        body_values = [
-            {"type": "text", "text": first_name},
-            {"type": "text", "text": company},
-            {"type": "text", "text": job_position},
-        ][:max(0, param_count)]
+    base_body_params = [
+        {"parameter_name": "first_name", "text": first_name},
+        {"parameter_name": "company", "text": company},
+        {"parameter_name": "job_position", "text": job_position},
+    ]
+
+    def build_payload(param_count: int, *, use_names: bool = True):
+        if param_count > len(base_body_params):
+            print(
+                f"[WARN] Template expects {param_count} parameters but only {len(base_body_params)} provided. "
+                "Using available values."
+            )
+
+        selected_params = base_body_params[:max(0, param_count)]
+        body_values = []
+        for param in selected_params:
+            entry = {"type": "text", "text": param["text"]}
+            if use_names and param.get("parameter_name"):
+                entry["parameter_name"] = param["parameter_name"]
+            body_values.append(entry)
 
         return {
             "messaging_product": "whatsapp",
@@ -459,7 +473,7 @@ def send_onboarding_template(phone_number, first_name: str, company: str, job_po
 
     payload = build_payload(3)
     response = requests.post(url, headers=headers, json=payload)
-    print(f"📨 Meta response: {response.status_code} {response.text}")
+    print(f"[META] Response: {response.status_code} {response.text}")
 
     if response.status_code == 400:
         fallback_count = None
@@ -482,17 +496,33 @@ def send_onboarding_template(phone_number, first_name: str, company: str, job_po
                 if expected_count >= 0 and expected_count != received_count:
                     fallback_count = expected_count
                     print(
-                        f"⚠️ Template expects {expected_count} parameter(s); retrying with trimmed payload."
+                        f"[WARN] Template expects {expected_count} parameter(s); retrying with trimmed payload."
                     )
             else:
-                print("⚠️ Unable to parse expected parameter count from Meta error details.")
+                print("[WARN] Unable to parse expected parameter count from Meta error details.")
         except (ValueError, json.JSONDecodeError) as parse_error:
-            print(f"⚠️ Failed to parse Meta error response: {parse_error}")
+            print(f"[WARN] Failed to parse Meta error response: {parse_error}")
 
         if fallback_count is not None:
             fallback_payload = build_payload(fallback_count)
             response = requests.post(url, headers=headers, json=fallback_payload)
-            print(f"📨 Meta response (retry): {response.status_code} {response.text}")
+            print(f"[META] Response (retry): {response.status_code} {response.text}")
+
+            if response.status_code == 400:
+                try:
+                    retry_json = response.json()
+                    retry_details = (
+                        retry_json.get("error", {})
+                        .get("error_data", {})
+                        .get("details", "")
+                    )
+                except (ValueError, json.JSONDecodeError):
+                    retry_details = response.text
+
+                print(
+                    f"[ERROR] Retry still failing for template {payload['template']['name']}: "
+                    f"{response.status_code} {retry_details}"
+                )
 
     response.raise_for_status()
     return response.json()
@@ -597,9 +627,9 @@ Escalate only if scores are high; do not escalate for polite help/thanks.
             candidate.escalation_reason = escalation_reason
             candidate.save()
             send_escalation_email(candidate)
-            print(f"⛔ Background escalation: {escalation_reason}")
+            print(f"[ESCALATION] Background escalation: {escalation_reason}")
     except Exception as e:
-        print(f"⚠️ Background escalation check failed: {e}")
+        print(f"[WARN] Background escalation check failed: {e}")
 
 
 # ==============================
@@ -635,7 +665,7 @@ def process_webhook_message(data: dict):
         
         # MESSAGE DEDUPLICATION - prevent loop
         if message_id and message_id in candidate.processed_message_ids:
-            print(f"⚠️ Duplicate message {message_id} - skipping")
+            print(f"[WARN] Duplicate message {message_id} - skipping")
             return
         
         # Mark message as processed
@@ -661,12 +691,12 @@ def process_webhook_message(data: dict):
             lang = detect_language(incoming_msg)
             handoff_msg = "Ti metto in contatto con un operatore. A breve riceverai assistenza." if lang == "it" else "I'll connect you with an operator. You'll receive assistance shortly."
             send_text_message(sender_id, handoff_msg)
-            print(f"⛔ Immediate escalation triggered")
+            print("[ESCALATION] Immediate escalation triggered")
             return
         
         # Skip if already escalated
         if candidate.status == 'escalated':
-            print("⛔ Bot paused for this user (already escalated).")
+            print("[ESCALATION] Bot paused for this user (already escalated).")
             return
 
         # ===== Orchestrated normal reply =====
@@ -678,7 +708,7 @@ def process_webhook_message(data: dict):
         candidate.save()
 
         send_text_message(sender_id, reply)
-        print("✅ Replied successfully")
+        print("[INFO] Replied successfully")
 
         # ===== Tier 2: Background escalation analysis (after reply sent) =====
         # Spawn background thread for GPT-based frustration detection
@@ -691,14 +721,14 @@ def process_webhook_message(data: dict):
             try:
                 summarize_if_needed(candidate)
             except Exception as e:
-                print(f"⚠️ Background summary failed: {e}")
+                print(f"[WARN] Background summary failed: {e}")
         
         summary_thread = threading.Thread(target=background_summarize)
         summary_thread.daemon = True
         summary_thread.start()
 
     except Exception as e:
-        print("❌ Error in background processing:", e)
+        print("[ERROR] Error in background processing:", e)
 
 
 @csrf_exempt
@@ -783,11 +813,11 @@ def upload_excel(request):
                     if not job_position or job_position.lower() == 'nan':
                         job_position = "la posizione proposta"
 
-                    print(f"📤 Sending to {phone} with name: {first_name}, company: {company}, position: {job_position}")
+                    print(f"[BULK] Sending to {phone} with name: {first_name}, company: {company}, position: {job_position}")
                     send_onboarding_template(phone, first_name, company, job_position)
                     added += 1
                 except Exception as e:
-                    print(f"❌ Failed to send to {phone}: {e}")
+                    print(f"[ERROR] Failed to send to {phone}: {e}")
                     failed.append(phone)
 
             return JsonResponse({'success': True, 'added': added, 'skipped': skipped, 'failed': failed})
@@ -948,7 +978,7 @@ from django.core.mail import send_mail
 def send_escalation_email(candidate):
     subject = f"[Escalation Alert] {candidate.name or 'Unknown'} ({candidate.phone_number})"
     message = f"""
-⚠️ A user has been escalated!
+ALERT: A user has been escalated!
 
 Name: {candidate.name}
 Phone: {candidate.phone_number}
@@ -956,7 +986,7 @@ Reason: {candidate.escalation_reason or 'N/A'}
 
 Check the admin panel for full chat history.
 
-— InPlace Onboarding Bot
+- InPlace Onboarding Bot
 """
     try:
         send_mail(
@@ -966,6 +996,6 @@ Check the admin panel for full chat history.
             [os.getenv("ADMIN_ALERT_EMAIL")],
             fail_silently=False,
         )
-        print("✅ Email sent to admin.")
+        print("[INFO] Email sent to admin.")
     except Exception as e:
-        print("❌ Failed to send email:", e)
+        print("[ERROR] Failed to send email:", e)
