@@ -419,8 +419,8 @@ def send_onboarding_template(phone_number, first_name: str, company: str, job_po
 
     base_body_params = [
         {"parameter_name": "first_name", "text": first_name},
-        {"parameter_name": "company", "text": company},
-        {"parameter_name": "job_position", "text": job_position},
+        {"parameter_name": "nome_azienda", "text": company},
+        {"parameter_name": "nome_posizione", "text": job_position},
     ]
 
     def build_payload(param_count: int, *, use_names: bool = True):
