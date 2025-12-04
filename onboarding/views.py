@@ -419,8 +419,6 @@ def send_onboarding_template(phone_number, first_name: str, company: str, job_po
 
     base_body_params = [
         {"parameter_name": "first_name", "text": first_name},
-        {"parameter_name": "nome_azienda", "text": company},
-        {"parameter_name": "nome_posizione", "text": job_position},
     ]
 
     def build_payload(param_count: int, *, use_names: bool = True):
@@ -443,7 +441,7 @@ def send_onboarding_template(phone_number, first_name: str, company: str, job_po
             "to": phone_number,
             "type": "template",
             "template": {
-                "name": "inplace_onboarding_v3",
+                "name": "driver_selezione_inplace",
                 "language": {"code": "it"},
                 "components": [
                     {
@@ -471,7 +469,7 @@ def send_onboarding_template(phone_number, first_name: str, company: str, job_po
         "Content-Type": "application/json"
     }
 
-    payload = build_payload(3)
+    payload = build_payload(1)
     response = requests.post(url, headers=headers, json=payload)
     print(f"[META] Response: {response.status_code} {response.text}")
 
